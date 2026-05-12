@@ -1,0 +1,57 @@
+{
+  "name": "@cross-deck/node",
+  "version": "0.1.0",
+  "description": "Crossdeck server SDK for Node.js — secret-key access to entitlements, identity, telemetry, purchases, and audit reads.",
+  "license": "MIT",
+  "homepage": "https://cross-deck.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VistaApps-za/crossdeck-node.git"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run lint && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@vitest/coverage-v8": "^2.1.9",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.9"
+  },
+  "keywords": [
+    "crossdeck",
+    "node",
+    "server-sdk",
+    "subscriptions",
+    "entitlements",
+    "telemetry",
+    "audit"
+  ]
+}
