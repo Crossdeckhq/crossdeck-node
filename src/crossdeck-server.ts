@@ -280,6 +280,38 @@ export class CrossdeckServer extends EventEmitter {
       });
       this.flushOnExit.install();
     }
+
+    // Boot heartbeat. Fire-and-forget. Solves the cold-start
+    // verification problem: the moment the customer's process boots
+    // and constructs the SDK, we phone home — the dashboard row flips
+    // LIVE within ~200ms without the caller having to add an explicit
+    // `.heartbeat()` call. Serverless functions cold-start, construct
+    // the SDK, fire the boot heartbeat, and the verification surface
+    // can confirm install end-to-end on the very first inbound request.
+    //
+    // Side benefit: the secret key is validated at process boot rather
+    // than at first event flush, so misconfigurations surface in logs
+    // immediately rather than minutes later when the queue first drains.
+    //
+    // Opt-out via testMode (unit tests don't want network) or by
+    // setting bootHeartbeat=false explicitly. Errors are swallowed so
+    // a broken backend / bad key / firewall never crashes the caller's
+    // process — heartbeat is diagnostic-grade, not load-bearing.
+    if (options.testMode !== true && options.bootHeartbeat !== false) {
+      // setImmediate lets the constructor return first so the caller's
+      // code reaches the next statement before we kick off the network
+      // call. Mirrors how Sentry's `Sentry.init()` schedules its boot
+      // session.
+      setImmediate(() => {
+        void this.heartbeat().catch((err) => {
+          this.debug.emit(
+            "sdk.boot_heartbeat_failed",
+            "Boot heartbeat failed (non-fatal — events will still flush).",
+            { message: err instanceof Error ? err.message : String(err) },
+          );
+        });
+      });
+    }
   }
 
   // ============================================================

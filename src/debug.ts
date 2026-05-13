@@ -35,7 +35,8 @@ export type DebugSignal =
   | "sdk.flush_on_exit_completed"
   | "sdk.webhook_verified"
   | "sdk.runtime_detected"
-  | "sdk.super_property_registered";
+  | "sdk.super_property_registered"
+  | "sdk.boot_heartbeat_failed";
 
 export interface DebugContext {
   [key: string]: unknown;

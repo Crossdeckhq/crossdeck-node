@@ -173,6 +173,28 @@ export interface CrossdeckServerOptions {
    */
   flushOnExitTimeoutMs?: number;
 
+  /**
+   * Fire a heartbeat in the background the moment the SDK is
+   * constructed. Default `true`.
+   *
+   * This is what makes the dashboard's "Verify install" surface
+   * actually work in cold-start serverless: the moment the customer's
+   * process boots and runs `new CrossdeckServer({...})`, we phone
+   * home, the dashboard row flips LIVE, and the caller doesn't have
+   * to add an explicit `await server.heartbeat()` to their bootstrap.
+   *
+   * Fire-and-forget. Failures are swallowed (the SDK still works for
+   * events even if this boot ping can't reach the backend). The
+   * caller's process never blocks on this.
+   *
+   * Set `false` if you want the prior v1.0.0 behaviour where the
+   * caller controlled when (or whether) the first network ping fired
+   * — e.g., very latency-sensitive cold paths, or environments where
+   * the very first request must not race with an SDK-initiated call.
+   * `testMode: true` also disables this implicitly.
+   */
+  bootHeartbeat?: boolean;
+
   // ============================================================
   // USP 3 — Entitlement caching (v1.0.0+)
   // ============================================================

@@ -4,6 +4,29 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-05-13
+
+### Added
+
+- **Auto-heartbeat on construction.** `new CrossdeckServer({...})` now
+  fires a heartbeat in the background the moment the SDK is
+  constructed, fire-and-forget. The dashboard's row flips LIVE within
+  ~200 ms of the customer's process boot — no explicit `.heartbeat()`
+  call required in the bootstrap. Solves the cold-start serverless
+  verification problem at its root (function boot triggers SDK
+  construction triggers heartbeat; the install-verifier's URL probe
+  doubles as a cold-start waker).
+- New option `bootHeartbeat?: boolean` (default `true`). Set `false`
+  for latency-sensitive cold paths that want the prior v1.0.0
+  caller-controlled behaviour. Implicitly disabled in `testMode`.
+
+### Why this is non-breaking
+
+The boot heartbeat is fire-and-forget and swallows its own errors —
+the caller's code never blocks on it, never throws, and a failure
+(bad key, network blip, firewall) has zero effect on subsequent
+event flushes. Equivalent to Sentry's `Sentry.init()` boot session.
+
 ## [1.0.0] — 2026-05-13
 
 Full three-USP server SDK release. Version-aligned with `@cross-deck/web@1.0.0`. Bank-grade quality bar — Stripe + Apple + Google VP-level QA review across two passes. 6,796 LOC of source / 6,230 LOC of tests / 398 unit tests + 19 e2e todos passing / Gate 3 fixture verifying the snippet against the built bundle. Web-SDK parity at the capability level: every Web SDK guarantee that has a server-side analogue ships here.
