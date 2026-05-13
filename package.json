@@ -1,7 +1,7 @@
 {
   "name": "@cross-deck/node",
-  "version": "0.1.0",
-  "description": "Crossdeck server SDK for Node.js — secret-key access to entitlements, identity, telemetry, purchases, and audit reads.",
+  "version": "1.0.0",
+  "description": "Crossdeck server SDK for Node.js — verified subscriptions, entitlements, server-side error capture, and product telemetry in one client.",
   "license": "MIT",
   "homepage": "https://cross-deck.com",
   "repository": {
@@ -16,6 +16,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
+    },
+    "./auto-events": {
+      "types": "./dist/auto-events/index.d.ts",
+      "import": "./dist/auto-events/index.mjs",
+      "require": "./dist/auto-events/index.cjs"
     },
     "./package.json": "./package.json"
   },
@@ -35,8 +40,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run lint && npm test && npm run build"
+    "prepublishOnly": "npm run lint && npm test && npm run build && npm run test:e2e"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
@@ -52,6 +58,14 @@
     "subscriptions",
     "entitlements",
     "telemetry",
-    "audit"
+    "audit",
+    "error-tracking",
+    "observability",
+    "express",
+    "fastify",
+    "lambda",
+    "firebase-functions",
+    "cloud-run",
+    "webhooks"
   ]
 }

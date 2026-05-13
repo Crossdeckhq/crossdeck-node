@@ -1,11 +1,6 @@
 # @cross-deck/node
 
-The Crossdeck server SDK for Node.js.
-
-This is the **secret-key** SDK: server-only, no browser assumptions, no
-auto-tracking, no local state. It wraps the real HTTP surface for
-entitlements, identity aliasing, event ingest, purchase forwarding, manual
-entitlement overrides, and audit reads.
+The Crossdeck server SDK for Node.js — one install, three pillars: **errors**, **analytics**, **entitlements**.
 
 ```bash
 npm install @cross-deck/node
@@ -18,115 +13,169 @@ import { CrossdeckServer } from "@cross-deck/node";
 
 const crossdeck = new CrossdeckServer({
   secretKey: process.env.CROSSDECK_SECRET_KEY!,
+  appId: "app_node_xxxxxxxxxxxx",
+  // env is inferred from the key prefix: cd_sk_test_… → sandbox, cd_sk_live_… → production
 });
 
-const entitlements = await crossdeck.getEntitlements({ userId: "user_847" });
+// Optional: validate the key at boot (recommended for serverless cold-starts)
+await crossdeck.heartbeat();
 
-await crossdeck.track({
-  name: "invoice.retry_started",
+// USP 1 — manual error capture
+try {
+  await processOrder(orderId);
+} catch (err) {
+  crossdeck.captureError(err, { context: { orderId } });
+  throw err;
+}
+
+// USP 2 — analytics
+crossdeck.track({
+  name: "checkout.completed",
   developerUserId: "user_847",
-  properties: { invoiceId: "inv_123" },
+  properties: { plan: "pro", revenue: 9_900 },
+});
+
+// USP 3 — entitlement gating (synchronous after first warm)
+await crossdeck.getEntitlements({ userId: "user_847" });
+if (crossdeck.isEntitled({ userId: "user_847" }, "pro")) {
+  // grant access
+}
+```
+
+## Three USPs, one SDK
+
+### USP 1 — Errors
+
+Auto-wired by default: `process.on('uncaughtException')`, `process.on('unhandledRejection')`, and `globalThis.fetch` wrap (5xx + network failures). Plus the full manual surface:
+
+```ts
+// Manual capture from try/catch
+crossdeck.captureError(err, {
+  context: { jobId },
+  tags: { flow: "checkout" },
+  level: "error", // "error" | "warning" | "info"
+});
+
+// Non-error signals (Sentry pattern)
+crossdeck.captureMessage("deprecated path hit", "warning");
+
+// Pin tags + context to all subsequent errors
+crossdeck.setTag("release", process.env.K_REVISION);
+crossdeck.setContext("region", { az: "us-east-1a" });
+
+// Add breadcrumbs (last 50 attached to every error report)
+crossdeck.addBreadcrumb({
+  timestamp: Date.now(),
+  category: "custom",
+  message: "user.opened_paywall",
+});
+
+// Pre-send hook for app-specific PII scrubbing
+crossdeck.setErrorBeforeSend((err) => {
+  if (err.message.includes("auth-token=")) return null;
+  return err;
 });
 ```
 
-## What this SDK is for
+Stack frames are parsed (V8 + Firefox/Safari formats), fingerprinted via djb2 over message + top-3 in-app frames, attached with the breadcrumb buffer + your context + tags. Rate-limited per fingerprint (default 5/min), session-capped (default 100/process). Frames inside `node_modules/`, `node:`, `internal/`, or `@cross-deck/node` are marked not-in-app and excluded from fingerprints.
 
-- **Server-side entitlement reads.** Query by `customerId`, `userId`, or `anonymousId`.
-- **Identity graph writes.** Alias a known `anonymousId` to your stable `userId`.
-- **Telemetry from jobs and backends.** Send events from cron jobs, webhooks, workers, and admin tools.
-- **Fast purchase forwarding.** Push signed Apple purchase evidence directly.
-- **Manual entitlement controls.** Grant or revoke an entitlement with a reason.
-- **Audit lookup.** Read one audit-log entry by event ID.
-
-## What this SDK is not
-
-- Not for browsers.
-- Not a wrapper around the web SDK.
-- Not a stateful singleton that keeps identity or a queue in memory.
-- Not an auto-tracker. Every server call is explicit.
-
-## Constructing the client
+To opt out (e.g. if you have a separate error tracker):
 
 ```ts
-import { CrossdeckServer } from "@cross-deck/node";
+new CrossdeckServer({ secretKey, errorCapture: false });
+```
 
-const crossdeck = new CrossdeckServer({
-  secretKey: process.env.CROSSDECK_SECRET_KEY!,
-  baseUrl: "https://api.cross-deck.com/v1", // optional
-  timeoutMs: 15_000,                        // optional
-  appId: "app_web_xxx",                     // optional informational event envelope field
+### USP 2 — Analytics
+
+`track()` enqueues synchronously into a durable retry-with-jitter queue with per-batch `Idempotency-Key` reuse on retry. Flush-on-exit drains before the process terminates — critical for Cloud Functions / Lambda where the runtime freezes the process and any pending events would otherwise vanish.
+
+```ts
+crossdeck.track({
+  name: "paywall_shown",
+  developerUserId: "user_847",
+  properties: { variant: "v3" },
 });
+
+// Super-properties (Mixpanel pattern) — carried on every subsequent event
+crossdeck.register({ serviceVersion: process.env.K_REVISION });
+crossdeck.unregister("oldField");
+
+// Group analytics — attach $groups.<type> for B2B dashboard pivots
+crossdeck.group("org", "acme_inc");
+crossdeck.group("team", "design", { headcount: 12 });
+
+// Bulk imports — synchronous POST, returns IngestResponse
+await crossdeck.ingest([
+  { name: "job.completed", crossdeckCustomerId: "cdcust_x", properties: { durationMs: 1200 } },
+  { name: "job.completed", crossdeckCustomerId: "cdcust_y", properties: { durationMs: 950 } },
+]);
+
+// Drain the queue (call at end of Lambda/CF invocations)
+await crossdeck.flush();
 ```
 
-`secretKey` must start with `cd_sk_`. The constructor throws immediately on
-an invalid key prefix so a server misconfiguration fails at boot, not under
-load.
+> **Multi-tenant servers:** `register()` is **process-scoped**, not per-request. In a single Node process handling requests for many tenants, registering `{ tenant: "acme" }` taints every subsequent event from that process — including ones serving other tenants. For per-request properties, pass them on the `track()` call itself.
 
-## Identity
+#### Framework adapters (`@cross-deck/node/auto-events`)
 
-### `await crossdeck.identify(userId, anonymousId, options?)`
-
-Alias a pre-login `anonymousId` to your stable user ID. This is the same
-identity graph the web SDK uses, just called explicitly from your backend.
+Plug Crossdeck into your existing framework with a single middleware/wrap call. Auto-emits `request.handled` / `function.invoked` / `function.completed` / `function.failed` events, captures uncaught errors with request context, and (on Lambda + Firebase) awaits `flush()` before the handler returns.
 
 ```ts
-await crossdeck.identify("user_847", "anon_123", {
-  email: "wes@example.com",
-  traits: { plan: "pro", region: "za" },
+import {
+  crossdeckExpress,
+  crossdeckExpressErrorHandler,
+  wrapLambdaHandler,
+  wrapFunction,
+} from "@cross-deck/node/auto-events";
+
+// Express 4 + 5
+app.use(crossdeckExpress(crossdeck, {
+  getIdentity: (req) => ({ developerUserId: req.user?.id }),
+}));
+// ... routes ...
+app.use(crossdeckExpressErrorHandler(crossdeck)); // register LAST
+
+// AWS Lambda + Vercel Functions (which run on Lambda underneath)
+export const handler = wrapLambdaHandler(crossdeck, async (event, ctx) => {
+  return { statusCode: 200, body: "ok" };
 });
+
+// Firebase Functions v1 + v2, Cloud Run (generic shape-preserving wrap)
+export const myFunction = onRequest(
+  wrapFunction(crossdeck, async (req, res) => {
+    res.send("ok");
+  }),
+);
 ```
 
-`identify()` is a convenience alias for `aliasIdentity(...)`.
+### USP 3 — Entitlements
 
-Traits are sanitised before send with the same rules as `@cross-deck/web`:
-`BigInt` becomes a string, circular refs become `"[circular]"`, `Map`/`Set`
-normalise to JSON-friendly shapes, and functions/symbols/`undefined` are dropped.
-
-### `await crossdeck.forget(hints)`
-
-Queue GDPR/CCPA deletion by `customerId`, `userId`, or `anonymousId`.
+Per-customer TTL cache (default 60s). Hot-path entitlement gates become synchronous memory reads after the first warm. Bounded by `maxCustomers` (default 10,000) with LRU eviction for long-running multi-tenant servers.
 
 ```ts
-await crossdeck.forget({ customerId: "cdcust_123" });
-```
+// Warm the cache (records userId → customerId alias)
+await crossdeck.getEntitlements({ userId: "user_847" });
 
-## Entitlements
+// Synchronous gate — memory read within TTL, no HTTP
+if (crossdeck.isEntitled({ userId: "user_847" }, "pro")) {
+  // grant access
+}
 
-### `await crossdeck.getEntitlements(hints)`
+// Full snapshot for callers needing source / validUntil
+const ents = crossdeck.listEntitlements({ userId: "user_847" });
 
-Read entitlements by any supported identity hint.
+// Subscribe to cache mutations (e.g. push to connected clients)
+const unsubscribe = crossdeck.onEntitlementsChange((customerId, ents) => {
+  // ...
+});
 
-```ts
-const result = await crossdeck.getEntitlements({ userId: "user_847" });
-console.log(result.data.map((e) => e.key));
-```
-
-### `await crossdeck.getCustomerEntitlements(customerId)`
-
-Server-only direct lookup by canonical Crossdeck customer ID.
-
-```ts
-const result = await crossdeck.getCustomerEntitlements("cdcust_123");
-```
-
-### `await crossdeck.grantEntitlement(input)`
-
-Manually grant an entitlement.
-
-```ts
+// Server-side manual overrides
 await crossdeck.grantEntitlement({
   customerId: "cdcust_123",
   entitlementKey: "pro",
   duration: "P30D",
   reason: "Support recovery after billing incident",
 });
-```
-
-### `await crossdeck.revokeEntitlement(input)`
-
-Manually revoke an entitlement.
-
-```ts
 await crossdeck.revokeEntitlement({
   customerId: "cdcust_123",
   entitlementKey: "pro",
@@ -134,104 +183,337 @@ await crossdeck.revokeEntitlement({
 });
 ```
 
-## Events
+#### Webhook signature verification
 
-### `await crossdeck.track(event)`
-
-Send one event immediately.
+Stripe-compatible HMAC-SHA256 with constant-time comparison + replay window. Supports multi-secret rotation.
 
 ```ts
-await crossdeck.track({
-  name: "support.refund_issued",
-  crossdeckCustomerId: "cdcust_123",
-  properties: { ticketId: "ticket_987" },
+import { verifyWebhookSignature } from "@cross-deck/node";
+import express from "express";
+
+app.post("/crossdeck-webhook", express.raw({ type: "application/json" }), (req, res) => {
+  try {
+    const event = verifyWebhookSignature(
+      req.body.toString("utf8"),
+      req.headers["crossdeck-signature"],
+      [process.env.CROSSDECK_WEBHOOK_SECRET, process.env.CROSSDECK_WEBHOOK_SECRET_OLD],
+      // 5-min default replay window
+    );
+    handleCrossdeckEvent(event);
+    res.sendStatus(200);
+  } catch (err) {
+    res.sendStatus(401);
+  }
 });
 ```
 
-Identity is required on every event. Provide at least one of:
+For test fixtures that need to mint signed webhooks against the same scheme, `signWebhookPayload(payload, secret, timestampSec)` is exported.
 
-- `developerUserId`
-- `anonymousId`
-- `crossdeckCustomerId`
+## Cross-cutting
 
-### `await crossdeck.ingest(events)`
+### Runtime info
 
-Send a batch in one call.
+Auto-detected at construction. Attached to every event + error as `runtime.*` properties:
 
-```ts
-await crossdeck.ingest([
-  {
-    name: "job.started",
-    developerUserId: "user_847",
-    properties: { job: "daily-mrr-reconcile" },
-  },
-  {
-    name: "job.completed",
-    developerUserId: "user_847",
-    properties: { job: "daily-mrr-reconcile", durationMs: 842 },
-  },
-]);
-```
+| Detected platform | Trigger env var | Surfaces as `runtime.host` |
+|---|---|---|
+| AWS Lambda + Vercel Functions | `AWS_LAMBDA_FUNCTION_NAME` | `aws-lambda` |
+| Azure Functions | `FUNCTIONS_WORKER_RUNTIME` + `WEBSITE_INSTANCE_ID` | `azure-functions` |
+| Google App Engine | `GAE_APPLICATION` | `google-app-engine` |
+| Firebase Functions v2 / Cloud Functions Gen 2 | `K_SERVICE` + `FIREBASE_CONFIG` | `firebase-functions-v2` |
+| Firebase Functions v1 | `FUNCTION_NAME` + `FUNCTION_REGION` | `firebase-functions-v1` |
+| Google Cloud Run | `K_SERVICE` + `K_REVISION` (no Firebase) | `cloud-run` |
+| Vercel | `VERCEL === "1"` | `vercel` |
+| Netlify Functions | `NETLIFY === "true"` | `netlify` |
+| Heroku | `DYNO` | `heroku` |
+| Render | `RENDER === "true"` | `render` |
+| Railway | `RAILWAY_ENVIRONMENT` | `railway` |
+| Fly.io | `FLY_APP_NAME` | `fly` |
+| Generic Kubernetes | `KUBERNETES_SERVICE_HOST` | `kubernetes` |
+| Plain Node | (fallback) | `node` |
 
-The SDK auto-mints `eventId` and `timestamp` if you omit them.
-
-Event `properties` are sanitised with the same contract as the web SDK before
-they hit the wire, so one bad backend-shaped object cannot crash request
-serialization.
-
-## Purchases
-
-### `await crossdeck.syncPurchases(input)`
-
-Forward Apple signed purchase evidence to Crossdeck.
+Every detected platform exposes `serviceName`, `serviceVersion`, `region`, `instanceId` where available. Override via constructor:
 
 ```ts
-await crossdeck.syncPurchases({
-  signedTransactionInfo: transactionJws,
-  signedRenewalInfo: renewalJws,
+new CrossdeckServer({
+  secretKey,
+  serviceName: "my-fn",
+  serviceVersion: process.env.K_REVISION,
+  appVersion: "1.2.3", // attached to events as `appVersion`
 });
 ```
 
-## Audit
-
-### `await crossdeck.getAuditEntry(eventId)`
-
-Read one audit row by event ID.
+### Diagnostics
 
 ```ts
-const audit = await crossdeck.getAuditEntry("srv_grant_123");
-console.log(audit.decision, audit.reason);
+const d = crossdeck.diagnostics();
+// {
+//   sdkVersion, baseUrl, secretKeyPrefix (masked), env,
+//   runtime: { nodeVersion, platform, host, region, serviceName, ... },
+//   events: { buffered, dropped, inFlight, consecutiveFailures, ... },
+//   errors: { sessionCount, fingerprintsTracked, handlersInstalled },
+//   entitlements: { count, ttlMs, lastUpdated, listenerErrors },
+// }
 ```
 
-## Errors
+Useful for `/health` and `/metrics` endpoints exposed to your platform.
 
-Every non-2xx response is normalised to `CrossdeckError`:
+### Debug mode
 
 ```ts
-import { CrossdeckError } from "@cross-deck/node";
+new CrossdeckServer({ secretKey, debug: true });
+```
+
+Emits NorthStar §16 debug signals to `console.info`:
+
+- `sdk.configured` — boot confirmation
+- `sdk.first_event_sent` — proves wire connectivity
+- `sdk.flush_retry_scheduled` — surfaces flush failures + retry delay
+- `sdk.flush_on_exit_started` / `sdk.flush_on_exit_completed` — drain lifecycle
+- `sdk.entitlement_cache_warm` / `sdk.entitlement_cache_used` — cache observability
+- `sdk.webhook_verified` — signature verification confirmation
+- `sdk.sensitive_property_warning` — flagged property names on `track()`
+- `sdk.runtime_detected` — host platform detection
+
+### PII scrub utility
+
+Opt-in regex-based scrub for email + card-number-shaped substrings. Use before forwarding caller-supplied properties:
+
+```ts
+import { scrubPiiFromProperties } from "@cross-deck/node";
+
+crossdeck.track({
+  name: "checkout.failed",
+  developerUserId,
+  properties: scrubPiiFromProperties({
+    url: req.url, // /users/wes@example.com/ → /users/[email]/
+    failedCardLast4: payload.card_number, // 4242 4242 4242 4242 → [card]
+  }),
+});
+```
+
+## Configuration
+
+All options on `new CrossdeckServer({...})`:
+
+```ts
+{
+  secretKey: string;            // required — `cd_sk_test_…` (sandbox) | `cd_sk_live_…` (production)
+  baseUrl?: string;             // default "https://api.cross-deck.com/v1"
+  timeoutMs?: number;           // default 15_000, 0 disables
+  appId?: string;               // optional metadata on event envelope
+  sdkVersion?: string;          // override the version reported on the wire
+
+  // USP 1
+  errorCapture?: boolean | Partial<ErrorCaptureConfig>;
+    // false to disable; partial object to override specific hooks
+    // (onUncaughtException, onUnhandledRejection, wrapFetch, etc.)
+
+  // USP 2
+  eventFlushBatchSize?: number; // default 20
+  eventFlushIntervalMs?: number;// default 1500
+  flushOnExit?: boolean;        // default true — beforeExit + SIGTERM + SIGINT drain
+  flushOnExitTimeoutMs?: number;// default 2000
+
+  // USP 3
+  entitlementCacheTtlMs?: number; // default 60_000, 0 disables
+
+  // Cross-cutting
+  serviceName?: string;         // overrides env-detected
+  serviceVersion?: string;      // overrides env-detected
+  appVersion?: string;          // attached as `appVersion` on events
+  debug?: boolean;              // default false
+  breadcrumbsMaxSize?: number;  // default 50
+
+  // Bank-grade SDK extras (QA-review v2)
+  testMode?: boolean;           // default false — short-circuits HTTP to synthetic responses
+  onRequest?: (info) => void;   // fires on every request (incl. retries)
+  onResponse?: (info) => void;  // fires on every response
+  httpRetries?: {               // idempotent GET retry policy
+    maxAttempts?: number;       // default 3 (1 initial + 2 retries)
+    retryableStatuses?: number[]; // default [408, 500, 502, 503, 504]
+  };
+  runtimeToken?: string;        // override the User-Agent runtime token
+}
+```
+
+## Error model
+
+Stripe-style subclass hierarchy. Use `instanceof` for typed narrowing in your `catch` blocks.
+
+```ts
+import {
+  CrossdeckError,
+  CrossdeckAuthenticationError,
+  CrossdeckRateLimitError,
+  CrossdeckNetworkError,
+  isCrossdeckErrorCode,
+} from "@cross-deck/node";
 
 try {
-  await crossdeck.getEntitlements({ userId: "user_847" });
+  await crossdeck.heartbeat();
 } catch (err) {
-  if (err instanceof CrossdeckError) {
+  if (err instanceof CrossdeckAuthenticationError) {
+    // 401 path — bad/revoked secret key, or bad webhook signature
+  } else if (err instanceof CrossdeckRateLimitError) {
+    // 429 — back off for err.retryAfterMs
+  } else if (err instanceof CrossdeckNetworkError) {
+    // fetch failed / aborted / timed out — likely transient
+  } else if (err instanceof CrossdeckError) {
+    if (isCrossdeckErrorCode(err.code) && err.code === "invalid_secret_key") {
+      // narrowed to the catalogue's literal union
+    }
     console.error(err.type, err.code, err.requestId);
   }
 }
 ```
 
-The error fields mirror the backend envelope:
+Subclasses: `CrossdeckAuthenticationError`, `CrossdeckPermissionError`, `CrossdeckValidationError`, `CrossdeckRateLimitError`, `CrossdeckNetworkError`, `CrossdeckInternalError`, `CrossdeckConfigurationError`. All extend `CrossdeckError`. Constructed automatically by the SDK — you never need to instantiate them yourself.
 
-- `type`
-- `code`
-- `message`
-- `requestId`
-- `status`
-- `retryAfterMs`
+`CrossdeckErrorCode` is the literal union of every documented code in `CROSSDECK_ERROR_CODES`. Use `isCrossdeckErrorCode` to narrow `string` to the union for type-safe comparisons (catches misspelled codes at compile time).
+
+`err.toJSON()` is implemented — your structured logger sees `type`, `code`, `requestId`, `status`, `retryAfterMs`, and `stack` instead of just `name + message`:
+
+```ts
+logger.error({ err }, "crossdeck request failed");
+// → { err: { name: "CrossdeckRateLimitError", type: "rate_limit_error",
+//             code: "too_many_requests", retryAfterMs: 30000, ... } }
+```
+
+Every entry in `CROSSDECK_ERROR_CODES` carries `{ code, type, description, resolution, retryable }` — render-able in dashboards and AI assistants.
+
+## Reliability + lifecycle
+
+### Idempotent GET retry
+
+Read methods (`getEntitlements`, `getCustomerEntitlements`, `getAuditEntry`, `heartbeat`) automatically retry on 408 + 5xx (except 501) and on network failures. Default 3 attempts with exponential backoff + full jitter. Honours server `Retry-After`. Configurable per-instance:
+
+```ts
+new CrossdeckServer({
+  secretKey,
+  httpRetries: { maxAttempts: 5 }, // up to 5 attempts
+});
+```
+
+POST methods (`track`/`ingest`/`syncPurchases`/`grantEntitlement`/`revokeEntitlement`) DO NOT auto-retry at the HTTP layer. Retries happen via the event queue with per-batch `Idempotency-Key` reuse — the server can dedupe replays.
+
+### AbortSignal — caller-controlled cancellation
+
+Every async method accepts a final `RequestOptions?` with `{ signal, timeoutMs }`:
+
+```ts
+const ctrl = new AbortController();
+const flight = crossdeck.heartbeat({ signal: ctrl.signal });
+setTimeout(() => ctrl.abort(), 100);
+try {
+  await flight;
+} catch (err) {
+  if (err instanceof CrossdeckNetworkError && err.code === "request_aborted") {
+    // caller-cancelled
+  }
+}
+```
+
+### EventEmitter — internal events
+
+`CrossdeckServer extends EventEmitter`. Subscribe to internal lifecycle events with typed listeners:
+
+```ts
+crossdeck.on("queue.flush_failed", ({ error, attempt, nextRetryMs }) => {
+  metrics.increment("crossdeck.flush_failed", { attempt });
+});
+crossdeck.on("error.captured", ({ fingerprint, kind, message }) => {
+  // forward to your other observability tools
+});
+crossdeck.on("sdk.shutdown", ({ reason }) => {
+  // last-chance cleanup
+});
+```
+
+Events: `queue.flush_succeeded`, `queue.flush_failed`, `queue.dropped`, `queue.buffer_changed`, `error.captured`, `entitlements.warmed`, `sdk.shutdown`.
+
+### Health probes — Kubernetes / load balancers
+
+```ts
+crossdeck.isReady();   // synchronous: false on sustained retry storm or buffer pressure
+await crossdeck.awaitReady(2000); // backpressure-aware wait
+crossdeck.getHealth(); // full snapshot
+
+// Express health endpoint
+app.get("/healthz", (_req, res) => {
+  const h = crossdeck.getHealth();
+  res.status(h.healthy ? 200 : 503).json(h);
+});
+```
+
+### Explicit resource management
+
+TC39 `using` / `await using` syntax (Node 20+, TS 5.2+):
+
+```ts
+{
+  using crossdeck = new CrossdeckServer({ secretKey });
+  // ... use crossdeck ...
+} // crossdeck[Symbol.dispose]() runs — handlers cleaned up
+
+async function lambdaHandler(event) {
+  await using crossdeck = new CrossdeckServer({ secretKey });
+  crossdeck.track({ name: "handler.invoked", developerUserId: event.userId });
+  // ... do work ...
+} // crossdeck[Symbol.asyncDispose]() runs — awaits flush() then cleans up
+```
+
+### testMode — caller tests without mocking fetch
+
+```ts
+const crossdeck = new CrossdeckServer({
+  secretKey: "cd_sk_test_test",
+  testMode: true,
+});
+// Every call returns a synthetic success shape — no network.
+// Use crossdeck.on("entitlements.warmed", ...) etc. to assert behaviour.
+```
+
+### onRequest / onResponse hooks
+
+```ts
+new CrossdeckServer({
+  secretKey,
+  onRequest: (info) => debug.log({ method: info.method, url: info.url, attempt: info.attempt }),
+  onResponse: (info) => metrics.histogram("crossdeck.request_ms", info.durationMs),
+});
+```
+
+Synchronous, errors swallowed — telemetry must never break the request pipeline.
+
+### Bulk entitlement ops
+
+```ts
+// Grant `pro_q1_bonus` to a list of customers, bounded concurrency
+const results = await crossdeck.bulkGrantEntitlement(
+  customerIds.map((customerId) => ({
+    customerId,
+    entitlementKey: "pro_q1_bonus",
+    duration: "P30D",
+    reason: "Q1 promo",
+  })),
+  { maxConcurrency: 10 },
+);
+
+const succeeded = results.filter((r) => r.ok);
+const failed = results.filter((r) => !r.ok);
+// Partial failures preserved as { ok: false, error }
+```
+
+Symmetric `bulkRevokeEntitlement(revokes[], options?)`.
 
 ## Node version
 
-Node 18+ is required. The SDK uses the platform `fetch` implementation and
-does not ship an HTTP dependency.
+Node 18+. Uses the platform `fetch` and `node:crypto` — zero runtime dependencies.
+
+## Bundle
+
+`dist/index.cjs` + `dist/index.mjs` (main entry) + `dist/auto-events/index.cjs` + `dist/auto-events/index.mjs` (framework adapters subpath). Strict TypeScript, full `.d.ts` for both entries, source maps included.
 
 ## License
 

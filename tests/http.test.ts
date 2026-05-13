@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CrossdeckError } from "../src/errors";
-import { DEFAULT_BASE_URL, HttpClient } from "../src/http";
+import { CrossdeckError, CrossdeckNetworkError } from "../src/errors";
+import { CROSSDECK_API_VERSION, DEFAULT_BASE_URL, HttpClient } from "../src/http";
 
 describe("HttpClient", () => {
   let originalFetch: typeof fetch;
@@ -196,5 +196,162 @@ describe("HttpClient", () => {
       type: "invalid_request_error",
       code: "serialization_failed",
     });
+  });
+
+  it("sends Crossdeck-Api-Version + User-Agent headers on every request", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    await client().request("GET", "/entitlements", { query: { userId: "u" } });
+    const [, init] = fetchSpy.mock.calls[0]!;
+    expect(init.headers["Crossdeck-Api-Version"]).toBe(CROSSDECK_API_VERSION);
+    expect(init.headers["User-Agent"]).toMatch(/^@cross-deck\/node\/[^ ]+ /);
+    expect(init.headers["User-Agent"]).toContain("node/");
+  });
+
+  it("idempotent GET retries on transient 503 — final attempt succeeds", async () => {
+    let calls = 0;
+    const fetchSpy = vi.fn().mockImplementation(() => {
+      calls += 1;
+      if (calls === 1)
+        return Promise.resolve(jsonResponse(503, { error: { type: "internal_error", code: "x", message: "down" } }));
+      if (calls === 2)
+        return Promise.resolve(jsonResponse(503, { error: { type: "internal_error", code: "x", message: "down" } }));
+      return Promise.resolve(jsonResponse(200, { ok: true }));
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const c = new HttpClient({
+      secretKey: "cd_sk_test_001",
+      baseUrl: DEFAULT_BASE_URL,
+      sdkVersion: "0.1.0-test",
+      httpRetries: { maxAttempts: 3 },
+    });
+    const result = await c.request<{ ok: boolean }>("GET", "/sdk/heartbeat");
+    expect(result.ok).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("GET retry — exhausted attempts throw the typed subclass (CrossdeckInternalError for 5xx)", async () => {
+    // Each call returns a FRESH Response — Response bodies are
+    // one-shot read streams, so reusing the same instance across
+    // retries falls through to the http_<status> fallback.
+    const fetchSpy = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(503, { error: { type: "internal_error", code: "down", message: "down" } }),
+      ),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const c = new HttpClient({
+      secretKey: "cd_sk_test_001",
+      baseUrl: DEFAULT_BASE_URL,
+      sdkVersion: "0.1.0-test",
+      httpRetries: { maxAttempts: 2 },
+    });
+    await expect(c.request("GET", "/sdk/heartbeat")).rejects.toMatchObject({ code: "down" });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("POST does NOT auto-retry (POST retries are queue-driven, not HTTP-driven)", async () => {
+    const fetchSpy = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(503, { error: { type: "internal_error", code: "x", message: "x" } }),
+      ),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const c = new HttpClient({
+      secretKey: "cd_sk_test_001",
+      baseUrl: DEFAULT_BASE_URL,
+      sdkVersion: "0.1.0-test",
+      httpRetries: { maxAttempts: 3 },
+    });
+    await expect(c.request("POST", "/events", { body: {} })).rejects.toBeInstanceOf(CrossdeckError);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("testMode short-circuits — no fetch goes out, synthetic response shape comes back", async () => {
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const c = new HttpClient({
+      secretKey: "cd_sk_test_001",
+      baseUrl: DEFAULT_BASE_URL,
+      sdkVersion: "0.1.0-test",
+      testMode: true,
+    });
+    const heartbeat = await c.request<{ ok: boolean; projectId: string }>("GET", "/sdk/heartbeat");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(heartbeat.ok).toBe(true);
+    expect(heartbeat.projectId).toBe("proj_test_mode");
+  });
+
+  it("onRequest / onResponse hooks fire on every attempt with the right shape", async () => {
+    let calls = 0;
+    const fetchSpy = vi.fn().mockImplementation(() => {
+      calls += 1;
+      if (calls === 1)
+        return Promise.resolve(jsonResponse(503, { error: { type: "internal_error", code: "x", message: "x" } }));
+      return Promise.resolve(jsonResponse(200, { ok: true }));
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const reqEvents: Array<{ attempt: number; method: string }> = [];
+    const resEvents: Array<{ attempt: number; status: number; testMode: boolean }> = [];
+    const c = new HttpClient({
+      secretKey: "cd_sk_test_001",
+      baseUrl: DEFAULT_BASE_URL,
+      sdkVersion: "0.1.0-test",
+      httpRetries: { maxAttempts: 2 },
+      onRequest: (info) => reqEvents.push({ attempt: info.attempt, method: info.method }),
+      onResponse: (info) => resEvents.push({ attempt: info.attempt, status: info.status, testMode: info.testMode }),
+    });
+    await c.request("GET", "/sdk/heartbeat");
+
+    expect(reqEvents).toEqual([
+      { attempt: 1, method: "GET" },
+      { attempt: 2, method: "GET" },
+    ]);
+    expect(resEvents).toHaveLength(2);
+    expect(resEvents[0]!.status).toBe(503);
+    expect(resEvents[1]!.status).toBe(200);
+    expect(resEvents[0]!.testMode).toBe(false);
+  });
+
+  it("AbortSignal — caller-supplied abort cancels the in-flight request as request_aborted", async () => {
+    // Mock fetch that honours the signal (real fetch does this; our
+    // mock has to mimic it so the test exercises the abort path).
+    globalThis.fetch = vi.fn().mockImplementation((_url: string, init: { signal?: AbortSignal }) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const onAbort = (): void => {
+          const err: Error & { name?: string } = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        };
+        if (init?.signal?.aborted) {
+          onAbort();
+          return;
+        }
+        init?.signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    const c = new HttpClient({
+      secretKey: "cd_sk_test_001",
+      baseUrl: DEFAULT_BASE_URL,
+      sdkVersion: "0.1.0-test",
+      timeoutMs: 0,
+    });
+    const ctrl = new AbortController();
+    const flight = c.request("GET", "/sdk/heartbeat", {
+      signal: ctrl.signal,
+      // Disable retries — we want the abort to surface immediately,
+      // not after the retry loop exhausts.
+      retries: { maxAttempts: 1 },
+    });
+    setTimeout(() => ctrl.abort(), 20);
+    try {
+      await flight;
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CrossdeckNetworkError);
+      expect((err as CrossdeckError).code).toBe("request_aborted");
+    }
   });
 });

@@ -1,0 +1,544 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { BreadcrumbBuffer } from "../src/breadcrumbs";
+import {
+  DEFAULT_ERROR_CAPTURE,
+  ErrorTracker,
+  type CapturedError,
+  type ErrorCaptureConfig,
+  type ErrorTrackerOptions,
+} from "../src/error-capture";
+
+/**
+ * Build a tracker with all global hooks disabled by default — tests of
+ * the manual captureError/captureMessage surface don't need
+ * `process.on(...)` listeners installed. Tests that DO want the global
+ * hooks pass them in explicitly via `configOverrides`.
+ */
+function makeTracker(
+  configOverrides: Partial<ErrorCaptureConfig> = {},
+  optionsOverrides: Partial<ErrorTrackerOptions> = {},
+): { tracker: ErrorTracker; reports: CapturedError[]; breadcrumbs: BreadcrumbBuffer } {
+  const reports: CapturedError[] = [];
+  const breadcrumbs = new BreadcrumbBuffer();
+  const config: ErrorCaptureConfig = {
+    ...DEFAULT_ERROR_CAPTURE,
+    onUncaughtException: false,
+    onUnhandledRejection: false,
+    wrapFetch: false,
+    captureConsole: false,
+    ...configOverrides,
+  };
+  const tracker = new ErrorTracker({
+    config,
+    breadcrumbs,
+    report: (e) => reports.push(e),
+    getContext: () => ({}),
+    getTags: () => ({}),
+    isConsented: () => true,
+    ...optionsOverrides,
+  });
+  tracker.install();
+  return { tracker, reports, breadcrumbs };
+}
+
+describe("captureError — manual API", () => {
+  it("captureError(new Error('boom')) builds a CapturedError with parsed frames + fingerprint", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureError(new Error("boom"));
+      expect(reports).toHaveLength(1);
+      expect(reports[0]!.kind).toBe("error.handled");
+      expect(reports[0]!.message).toBe("boom");
+      expect(reports[0]!.errorType).toBe("Error");
+      expect(reports[0]!.fingerprint).toMatch(/^[0-9a-f]{8}$/);
+      expect(reports[0]!.frames.length).toBeGreaterThan(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureError merges options.context with tracker-level context", () => {
+    const { tracker, reports } = makeTracker(
+      {},
+      { getContext: () => ({ session: "s1" }) },
+    );
+    try {
+      tracker.captureError(new Error("boom"), { context: { extra: "x" } });
+      expect(reports[0]!.context).toEqual({ session: "s1", extra: "x" });
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureError merges options.tags with tracker-level tags", () => {
+    const { tracker, reports } = makeTracker(
+      {},
+      { getTags: () => ({ release: "v1" }) },
+    );
+    try {
+      tracker.captureError(new Error("boom"), { tags: { flow: "checkout" } });
+      expect(reports[0]!.tags).toEqual({ release: "v1", flow: "checkout" });
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureError(non-Error) coerces via safeStringify and ships error.handled", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureError("just a string");
+      expect(reports[0]!.kind).toBe("error.handled");
+      expect(reports[0]!.message).toBe("just a string");
+      expect(reports[0]!.errorType).toBeNull();
+      expect(reports[0]!.frames).toEqual([]);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureError is silent when isConsented returns false (never throws)", () => {
+    const { tracker, reports } = makeTracker({}, { isConsented: () => false });
+    try {
+      expect(() => tracker.captureError(new Error("boom"))).not.toThrow();
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureError(err, { level: 'warning' }) ships level === 'warning'", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureError(new Error("boom"), { level: "warning" });
+      expect(reports[0]!.level).toBe("warning");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
+describe("captureMessage — Sentry pattern", () => {
+  it("captureMessage('hi', 'info') ships kind === 'error.message' with empty frames", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureMessage("hi", "info");
+      expect(reports[0]!.kind).toBe("error.message");
+      expect(reports[0]!.level).toBe("info");
+      expect(reports[0]!.message).toBe("hi");
+      expect(reports[0]!.frames).toEqual([]);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureMessage default level is 'info'", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureMessage("hi");
+      expect(reports[0]!.level).toBe("info");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
+describe("Global hook installation — Node", () => {
+  it("install() registers process.on('uncaughtException') when configured", () => {
+    const before = process.listenerCount("uncaughtException");
+    const { tracker } = makeTracker({ onUncaughtException: true });
+    try {
+      expect(process.listenerCount("uncaughtException")).toBe(before + 1);
+    } finally {
+      tracker.uninstall();
+      expect(process.listenerCount("uncaughtException")).toBe(before);
+    }
+  });
+
+  it("install() registers process.on('unhandledRejection') when configured", () => {
+    const before = process.listenerCount("unhandledRejection");
+    const { tracker } = makeTracker({ onUnhandledRejection: true });
+    try {
+      expect(process.listenerCount("unhandledRejection")).toBe(before + 1);
+    } finally {
+      tracker.uninstall();
+      expect(process.listenerCount("unhandledRejection")).toBe(before);
+    }
+  });
+
+  it("install() does NOT install an XHR wrap (no XHR in Node)", () => {
+    // There's no `wrapXhr` field on ErrorCaptureConfig — the very fact
+    // that it's not in the type system is the assertion. This test
+    // verifies the type-level guarantee at runtime by checking that
+    // `XMLHttpRequest` is not patched after install.
+    const before = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest;
+    const { tracker } = makeTracker({ wrapFetch: true });
+    try {
+      expect((globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest).toBe(before);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("uninstall() removes process listeners (idempotent install/uninstall)", () => {
+    const before = process.listenerCount("uncaughtException");
+    const { tracker } = makeTracker({ onUncaughtException: true });
+    tracker.uninstall();
+    expect(process.listenerCount("uncaughtException")).toBe(before);
+  });
+
+  it("install() is idempotent — second call is a no-op", () => {
+    const { tracker } = makeTracker({ onUncaughtException: true });
+    const after1 = process.listenerCount("uncaughtException");
+    try {
+      tracker.install(); // second call
+      expect(process.listenerCount("uncaughtException")).toBe(after1);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("handlersInstalled getter reports whether install() ran", () => {
+    const { tracker } = makeTracker({ onUncaughtException: true });
+    try {
+      expect(tracker.handlersInstalled).toBe(true);
+      tracker.uninstall();
+      expect(tracker.handlersInstalled).toBe(false);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
+describe("Fetch wrap — error.http capture", () => {
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("5xx response captured as error.http with status, method, url", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("err", { status: 500, statusText: "Server Error" }));
+    const { tracker, reports } = makeTracker({ wrapFetch: true });
+    try {
+      await globalThis.fetch("https://example.com/api");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]!.kind).toBe("error.http");
+      expect(reports[0]!.http).toMatchObject({ url: "https://example.com/api", status: 500 });
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("network failure captured as error.http with status: 0", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    const { tracker, reports } = makeTracker({ wrapFetch: true });
+    try {
+      await expect(globalThis.fetch("https://example.com/api")).rejects.toThrow();
+      expect(reports).toHaveLength(1);
+      expect(reports[0]!.kind).toBe("error.http");
+      expect(reports[0]!.http?.status).toBe(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("self-skip: requests to api.cross-deck.com are NEVER captured", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("err", { status: 500 }));
+    const { tracker, reports } = makeTracker({ wrapFetch: true });
+    try {
+      await globalThis.fetch("https://api.cross-deck.com/v1/events");
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("4xx responses are NOT captured (often expected — auth required, validation failed)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("nope", { status: 404 }));
+    const { tracker, reports } = makeTracker({ wrapFetch: true });
+    try {
+      await globalThis.fetch("https://example.com/api");
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("uninstall() restores the original fetch when no later wrapper layered on top", async () => {
+    const sentinel = globalThis.fetch;
+    const { tracker } = makeTracker({ wrapFetch: true });
+    expect(globalThis.fetch).not.toBe(sentinel);
+    tracker.uninstall();
+    expect(globalThis.fetch).toBe(sentinel);
+  });
+});
+
+describe("Filtering + sampling + rate limit", () => {
+  it("ignoreErrors string match drops the report", () => {
+    const { tracker, reports } = makeTracker({ ignoreErrors: ["expected-noise"] });
+    try {
+      tracker.captureError(new Error("this is expected-noise we ignore"));
+      tracker.captureError(new Error("genuine bug"));
+      expect(reports).toHaveLength(1);
+      expect(reports[0]!.message).toBe("genuine bug");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("ignoreErrors RegExp match drops the report", () => {
+    const { tracker, reports } = makeTracker({ ignoreErrors: [/^noise:/] });
+    try {
+      tracker.captureError(new Error("noise: skipped"));
+      tracker.captureError(new Error("real error"));
+      expect(reports).toHaveLength(1);
+      expect(reports[0]!.message).toBe("real error");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("denyPaths regex matches against the top-frame filename and drops", () => {
+    // Build a CapturedError with a frame in node_modules/@cross-deck/node
+    // via captureError of a manufactured Error with a forged stack.
+    const err = new Error("self-error");
+    err.stack = `Error: self-error\n    at SDK.method (/app/node_modules/@cross-deck/node/dist/index.cjs:42:1)`;
+    const { tracker, reports } = makeTracker(); // denyPaths default includes @cross-deck/node
+    try {
+      tracker.captureError(err);
+      // Stack parser marks the @cross-deck/node frame as not in_app, so
+      // it's excluded from the fingerprint. The frames array still has
+      // it; passesPathGate checks against the top frame's filename.
+      // Either way: the report is dropped because the only frame is in
+      // the denied path.
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("allowPaths filter requires at least one match when non-empty", () => {
+    const err = new Error("app-error");
+    err.stack = `Error: app-error\n    at App.handle (/app/src/handler.js:10:5)`;
+    const { tracker, reports } = makeTracker({
+      allowPaths: [/forbidden-prefix/],
+      denyPaths: [],
+    });
+    try {
+      tracker.captureError(err);
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("sampleRate < 1 — fingerprint with leading byte > sampleRate × 255 is dropped", () => {
+    // Deterministic: the fingerprint for a specific message-and-no-frames
+    // input is stable across runs. We pick a sampleRate of 0 to drop ALL.
+    const { tracker, reports } = makeTracker({ sampleRate: 0 });
+    try {
+      tracker.captureError(new Error("any"));
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("sampleRate = 1 always sends", () => {
+    const { tracker, reports } = makeTracker({ sampleRate: 1 });
+    try {
+      for (let i = 0; i < 5; i++) tracker.captureError(new Error(`unique-${i}`));
+      expect(reports.length).toBe(5);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("maxPerFingerprintPerMinute (default 5) caps per-fingerprint reports", () => {
+    const { tracker, reports } = makeTracker({ maxPerFingerprintPerMinute: 2 });
+    try {
+      // Same message + same (empty) frames → same fingerprint.
+      for (let i = 0; i < 5; i++) tracker.captureError("same fingerprint");
+      expect(reports.length).toBe(2);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("maxPerSession hard-caps total reports per process", () => {
+    const { tracker, reports } = makeTracker({ maxPerSession: 3 });
+    try {
+      for (let i = 0; i < 10; i++) tracker.captureError(new Error(`unique-${i}`));
+      expect(reports.length).toBe(3);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
+describe("beforeSend hook", () => {
+  it("beforeSend returning null drops the report", () => {
+    let beforeSend: ((err: CapturedError) => CapturedError | null) | null = () => null;
+    const reports: CapturedError[] = [];
+    const tracker = new ErrorTracker({
+      config: { ...DEFAULT_ERROR_CAPTURE, onUncaughtException: false, onUnhandledRejection: false, wrapFetch: false },
+      breadcrumbs: new BreadcrumbBuffer(),
+      report: (e: CapturedError) => reports.push(e),
+      getContext: () => ({}),
+      getTags: () => ({}),
+      isConsented: () => true,
+      get beforeSend() {
+        return beforeSend;
+      },
+    } as unknown as ErrorTrackerOptions);
+    tracker.install();
+    try {
+      tracker.captureError(new Error("boom"));
+      expect(reports).toHaveLength(0);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("beforeSend returning a modified CapturedError sends the modified version", () => {
+    let beforeSend: ((err: CapturedError) => CapturedError | null) | null = (err) => ({
+      ...err,
+      message: "[scrubbed]",
+    });
+    const reports: CapturedError[] = [];
+    const tracker = new ErrorTracker({
+      config: { ...DEFAULT_ERROR_CAPTURE, onUncaughtException: false, onUnhandledRejection: false, wrapFetch: false },
+      breadcrumbs: new BreadcrumbBuffer(),
+      report: (e: CapturedError) => reports.push(e),
+      getContext: () => ({}),
+      getTags: () => ({}),
+      isConsented: () => true,
+      get beforeSend() {
+        return beforeSend;
+      },
+    } as unknown as ErrorTrackerOptions);
+    tracker.install();
+    try {
+      tracker.captureError(new Error("token=abc"));
+      expect(reports[0]!.message).toBe("[scrubbed]");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("a throwing beforeSend falls back to the original report (never swallows)", () => {
+    let beforeSend: ((err: CapturedError) => CapturedError | null) | null = () => {
+      throw new Error("hook crashed");
+    };
+    const reports: CapturedError[] = [];
+    const tracker = new ErrorTracker({
+      config: { ...DEFAULT_ERROR_CAPTURE, onUncaughtException: false, onUnhandledRejection: false, wrapFetch: false },
+      breadcrumbs: new BreadcrumbBuffer(),
+      report: (e: CapturedError) => reports.push(e),
+      getContext: () => ({}),
+      getTags: () => ({}),
+      isConsented: () => true,
+      get beforeSend() {
+        return beforeSend;
+      },
+    } as unknown as ErrorTrackerOptions);
+    tracker.install();
+    try {
+      tracker.captureError(new Error("original"));
+      expect(reports).toHaveLength(1);
+      expect(reports[0]!.message).toBe("original");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
+describe("Defensive design", () => {
+  it("the tracker NEVER throws — every callback wrapped in try/swallow", () => {
+    const tracker = new ErrorTracker({
+      config: { ...DEFAULT_ERROR_CAPTURE, onUncaughtException: false, onUnhandledRejection: false, wrapFetch: false },
+      breadcrumbs: new BreadcrumbBuffer(),
+      report: () => {
+        throw new Error("report callback bug");
+      },
+      getContext: () => ({}),
+      getTags: () => ({}),
+      isConsented: () => true,
+    });
+    tracker.install();
+    try {
+      // The report callback is buggy. captureError must still not throw.
+      expect(() => tracker.captureError(new Error("boom"))).not.toThrow();
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("breadcrumbs from manual add are attached to subsequent error reports", () => {
+    const { tracker, reports, breadcrumbs } = makeTracker();
+    try {
+      breadcrumbs.add({ timestamp: Date.now(), category: "custom", message: "step-1" });
+      breadcrumbs.add({ timestamp: Date.now(), category: "custom", message: "step-2" });
+      tracker.captureError(new Error("boom"));
+      expect(reports[0]!.breadcrumbs).toHaveLength(2);
+      expect(reports[0]!.breadcrumbs[0]!.message).toBe("step-1");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("reportedCount + fingerprintsTracked getters reflect runtime state", () => {
+    const { tracker } = makeTracker();
+    try {
+      expect(tracker.reportedCount).toBe(0);
+      expect(tracker.fingerprintsTracked).toBe(0);
+      tracker.captureError(new Error("a"));
+      tracker.captureError(new Error("b"));
+      expect(tracker.reportedCount).toBe(2);
+      expect(tracker.fingerprintsTracked).toBe(2);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captureError fingerprints are stable across calls with the same message", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureError("same");
+      tracker.captureError("same");
+      expect(reports).toHaveLength(2);
+      expect(reports[0]!.fingerprint).toBe(reports[1]!.fingerprint);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
+describe("Memory bound — fingerprint window does not grow unboundedly", () => {
+  it("Map bounded under MAX_FINGERPRINTS_TRACKED after many unique fingerprints", () => {
+    // Run a session with maxPerSession set high enough to let all
+    // unique fingerprints through, but with the natural cap on the
+    // tracker's internal Map kicking in beyond 4096.
+    const { tracker } = makeTracker({
+      maxPerSession: 10_000,
+      maxPerFingerprintPerMinute: 100,
+    });
+    try {
+      // Fire 5,000 unique error messages — each gets a fresh fingerprint.
+      for (let i = 0; i < 5_000; i++) {
+        tracker.captureError(`unique-${i}`);
+      }
+      // The internal Map should NOT have all 5,000 entries — pruning
+      // happens opportunistically when the cap is exceeded. The
+      // public getter `fingerprintsTracked` is what we assert.
+      expect(tracker.fingerprintsTracked).toBeLessThanOrEqual(4_096);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});

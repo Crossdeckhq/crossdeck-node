@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/auto-events/index.ts"],
   format: ["cjs", "esm"],
   outExtension({ format }) {
     if (format === "cjs") return { js: ".cjs" };
