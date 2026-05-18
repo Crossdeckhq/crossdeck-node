@@ -304,3 +304,41 @@ describe("Output stability", () => {
     expect(() => collectRuntimeInfo()).not.toThrow();
   });
 });
+
+describe("collectRuntimeInfo — isServerless classification", () => {
+  let originalEnv: NodeJS.ProcessEnv;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    clearHostEnv();
+    delete process.env.DYNO;
+    resetRuntimeInfoCache();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    resetRuntimeInfoCache();
+  });
+
+  it("AWS Lambda → isServerless true (cold start = empty memory)", () => {
+    process.env.AWS_LAMBDA_FUNCTION_NAME = "my-fn";
+    expect(collectRuntimeInfo().isServerless).toBe(true);
+  });
+
+  it("Cloud Run → isServerless true", () => {
+    process.env.K_SERVICE = "svc";
+    process.env.K_REVISION = "svc-00001-abc";
+    expect(collectRuntimeInfo().isServerless).toBe(true);
+  });
+
+  it("plain Node → isServerless false (long-lived process, cache survives)", () => {
+    expect(collectRuntimeInfo().isServerless).toBe(false);
+  });
+
+  it("Heroku → isServerless false (long-lived dyno)", () => {
+    process.env.DYNO = "web.1";
+    const info = collectRuntimeInfo();
+    expect(info.host).toBe("heroku");
+    expect(info.isServerless).toBe(false);
+  });
+});

@@ -58,6 +58,7 @@ export type {
   Diagnostics,
   EntitlementMutationResult,
   EntitlementsListResponse,
+  EntitlementStore,
   Environment,
   EventProperties,
   ForgetResult,
@@ -73,6 +74,7 @@ export type {
   RequestOptions,
   RevokeEntitlementInput,
   ServerEvent,
+  StoredEntitlements,
   SyncPurchaseInput,
   ErrorLevel,
 } from "./types";

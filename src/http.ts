@@ -3,7 +3,7 @@ import { crossdeckErrorFromResponse } from "./errors";
 import { validateEventProperties } from "./event-validation";
 
 export const SDK_NAME = "@cross-deck/node";
-export const SDK_VERSION = "1.1.0";
+export const SDK_VERSION = "1.2.0";
 export const DEFAULT_BASE_URL = "https://api.cross-deck.com/v1";
 export const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -388,7 +388,7 @@ export class HttpClient {
  * the bespoke `Crossdeck-Sdk-Version` (which only carries the SDK
  * name/version).
  *
- *   @cross-deck/node/1.0.0 node/20.10.0 darwin
+ *   @cross-deck/node/1.2.0 node/20.10.0 darwin
  */
 function buildUserAgent(sdkVersion: string, override?: string): string {
   if (override) return `${SDK_NAME}/${sdkVersion} ${override}`;

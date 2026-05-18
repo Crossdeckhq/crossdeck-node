@@ -16,6 +16,9 @@
  *   - `sdk.webhook_verified`
  *   - `sdk.runtime_detected`
  *   - `sdk.entitlement_cache_warm`
+ *   - `sdk.entitlement_cache_stale`
+ *   - `sdk.entitlement_store_recovered`
+ *   - `sdk.no_durable_store`
  *   - `sdk.super_property_registered`
  */
 
@@ -26,6 +29,9 @@ export type DebugSignal =
   | "sdk.no_identity"
   | "sdk.entitlement_cache_used"
   | "sdk.entitlement_cache_warm"
+  | "sdk.entitlement_cache_stale"
+  | "sdk.entitlement_store_recovered"
+  | "sdk.no_durable_store"
   | "sdk.purchase_evidence_sent"
   | "sdk.environment_mismatch"
   | "sdk.sensitive_property_warning"

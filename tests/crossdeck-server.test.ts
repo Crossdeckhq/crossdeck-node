@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CrossdeckError } from "../src/errors";
 import { CrossdeckServer } from "../src/index";
+import { resetRuntimeInfoCache } from "../src/runtime-info";
 
 describe("CrossdeckServer", () => {
   let originalFetch: typeof fetch;
@@ -34,6 +35,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
     });
   }
 
@@ -45,6 +47,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
     });
   }
 
@@ -61,6 +64,7 @@ describe("CrossdeckServer", () => {
       appId: "app_web_123",
       sdkVersion: "0.1.0-test",
       flushOnExit: false,
+      bootHeartbeat: false,
       errorCapture: {
         onUncaughtException: false,
         onUnhandledRejection: false,
@@ -81,6 +85,7 @@ describe("CrossdeckServer", () => {
           secretKey: "cd_pub_test_001",
           errorCapture: false,
           flushOnExit: false,
+          bootHeartbeat: false,
         }),
     ).toThrowError(CrossdeckError);
   });
@@ -962,6 +967,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
     });
     expect(s.diagnostics().env).toBe("production");
   });
@@ -978,6 +984,7 @@ describe("CrossdeckServer", () => {
       secretKey: "cd_sk_test_001",
       sdkVersion: "0.1.0-test",
       flushOnExit: false,
+      bootHeartbeat: false,
       // errorCapture defaults to true → handlers install
     });
     try {
@@ -1209,9 +1216,257 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
       entitlementCacheTtlMs: 5000,
     });
     expect(s.diagnostics().entitlements.ttlMs).toBe(5000);
+  });
+
+  // ============================================================
+  // USP 3 — Durable last-known-good entitlement store
+  // ============================================================
+
+  /** In-memory EntitlementStore for tests — what a developer wires to Redis. */
+  function memoryStore() {
+    const map = new Map<string, unknown>();
+    return {
+      map,
+      saveCalls: [] as string[],
+      loadCalls: [] as string[],
+      async load(key: string) {
+        this.loadCalls.push(key);
+        return (map.get(key) as never) ?? null;
+      },
+      async save(key: string, value: unknown) {
+        this.saveCalls.push(key);
+        map.set(key, value);
+      },
+    };
+  }
+
+  function entitlementsResponse(customerId = "cdcust_abc") {
+    return jsonResponse({
+      object: "list",
+      data: [
+        {
+          object: "entitlement",
+          key: "pro",
+          isActive: true,
+          validUntil: null,
+          source: { rail: "manual", productId: "p", subscriptionId: "s" },
+          updatedAt: 1,
+        },
+      ],
+      crossdeckCustomerId: customerId,
+      env: "sandbox",
+    });
+  }
+
+  function serverWithStore(store: { load: unknown; save: unknown }): CrossdeckServer {
+    return new CrossdeckServer({
+      secretKey: "cd_sk_test_001",
+      sdkVersion: "0.1.0-test",
+      errorCapture: false,
+      flushOnExit: false,
+      bootHeartbeat: false,
+      entitlementStore: store as never,
+    });
+  }
+
+  it("getEntitlements() persists a successful fetch to the durable store", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(entitlementsResponse()) as unknown as typeof fetch;
+    const store = memoryStore();
+    const s = serverWithStore(store);
+
+    await s.getEntitlements({ userId: "user_1" });
+
+    // Saved under the canonical customerId AND the userId hint, so a
+    // cold-start load can hit it before the alias map is populated.
+    expect(store.saveCalls).toContain("cdcust_abc");
+    expect(store.saveCalls).toContain("user_1");
+    expect(store.map.get("cdcust_abc")).toMatchObject({
+      v: 1,
+      crossdeckCustomerId: "cdcust_abc",
+      env: "sandbox",
+    });
+  });
+
+  it("getEntitlements() recovers from the store when the network fails", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+    const store = memoryStore();
+    // Pre-seed last-known-good (a previous successful fetch).
+    store.map.set("cdcust_abc", {
+      v: 1,
+      crossdeckCustomerId: "cdcust_abc",
+      entitlements: [
+        {
+          object: "entitlement",
+          key: "pro",
+          isActive: true,
+          validUntil: null,
+          source: { rail: "manual", productId: "p", subscriptionId: "s" },
+          updatedAt: 1,
+        },
+      ],
+      env: "sandbox",
+      savedAt: Date.now() - 5000,
+    });
+    const s = serverWithStore(store);
+
+    // Outage — but the store recovers the customer's entitlements.
+    const result = await s.getEntitlements({ customerId: "cdcust_abc" });
+    expect(result.crossdeckCustomerId).toBe("cdcust_abc");
+    expect(result.data).toHaveLength(1);
+    // Cache repopulated from the store — isEntitled() answers from it.
+    expect(s.isEntitled({ customerId: "cdcust_abc" }, "pro")).toBe(true);
+    // A store recovery is an OUTAGE fallback, not a fresh server read —
+    // the customer stays flagged stale so the outage remains visible.
+    expect(s.diagnostics().entitlements.isStale).toBe(true);
+  });
+
+  it("getEntitlements() rethrows the network error when NO store is configured", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+    await expect(server().getEntitlements({ customerId: "cdcust_abc" })).rejects.toThrow();
+  });
+
+  it("getEntitlements() rethrows when the store has no snapshot for the customer", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+    const store = memoryStore(); // empty
+    const s = serverWithStore(store);
+    await expect(s.getEntitlements({ customerId: "cdcust_unknown" })).rejects.toThrow();
+  });
+
+  it("a network failure marks the customer stale (visible in diagnostics)", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+    const s = server();
+    await expect(s.getEntitlements({ customerId: "cdcust_abc" })).rejects.toThrow();
+    const diag = s.diagnostics().entitlements;
+    expect(diag.isStale).toBe(true);
+    expect(diag.staleCustomers).toBe(1);
+    expect(diag.lastRefreshFailedAt).toBeGreaterThan(0);
+  });
+
+  it("durable store recovery survives a cold start — load works before any warm", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+    const store = memoryStore();
+    // Snapshot persisted by a PRIOR process instance, keyed by userId.
+    store.map.set("user_1", {
+      v: 1,
+      crossdeckCustomerId: "cdcust_abc",
+      entitlements: [
+        {
+          object: "entitlement",
+          key: "pro",
+          isActive: true,
+          validUntil: null,
+          source: { rail: "manual", productId: "p", subscriptionId: "s" },
+          updatedAt: 1,
+        },
+      ],
+      env: "sandbox",
+      savedAt: Date.now() - 60_000,
+    });
+    // Fresh SDK instance — empty in-memory cache, empty alias map.
+    const s = serverWithStore(store);
+    const result = await s.getEntitlements({ userId: "user_1" });
+    expect(result.data).toHaveLength(1);
+    expect(s.isEntitled({ userId: "user_1" }, "pro")).toBe(true);
+  });
+
+  it("a store.save() failure does not fail an otherwise-successful fetch", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(entitlementsResponse()) as unknown as typeof fetch;
+    const s = serverWithStore({
+      load: async () => null,
+      save: async () => {
+        throw new Error("redis down");
+      },
+    });
+    // Fetch succeeds, the cache is warm — the save throwing is swallowed.
+    const result = await s.getEntitlements({ userId: "user_1" });
+    expect(result.data).toHaveLength(1);
+    expect(s.isEntitled({ userId: "user_1" }, "pro")).toBe(true);
+  });
+
+  it("diagnostics().entitlements reflects durable-store posture", () => {
+    expect(server().diagnostics().entitlements.durableStore).toBe(false);
+    expect(
+      serverWithStore(memoryStore()).diagnostics().entitlements.durableStore,
+    ).toBe(true);
+  });
+
+  it("diagnostics().entitlements.coldStartDurable is false on serverless with no store", () => {
+    process.env.AWS_LAMBDA_FUNCTION_NAME = "fn-cold-start";
+    resetRuntimeInfoCache();
+    try {
+      const noStore = new CrossdeckServer({
+        secretKey: "cd_sk_test_001",
+        sdkVersion: "0.1.0-test",
+        errorCapture: false,
+        flushOnExit: false,
+        bootHeartbeat: false,
+      });
+      expect(noStore.diagnostics().entitlements.coldStartDurable).toBe(false);
+      // Wiring a store closes the cold-start gap.
+      expect(
+        serverWithStore(memoryStore()).diagnostics().entitlements.coldStartDurable,
+      ).toBe(true);
+    } finally {
+      delete process.env.AWS_LAMBDA_FUNCTION_NAME;
+      resetRuntimeInfoCache();
+    }
+  });
+
+  it("emits an sdk.boot telemetry event carrying durability facts (serverless, no store → coldStartDurable false)", async () => {
+    process.env.AWS_LAMBDA_FUNCTION_NAME = "fn-boot-telemetry";
+    resetRuntimeInfoCache();
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({ object: "list", received: 1, env: "sandbox" }),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    try {
+      // bootHeartbeat ON (default) — the boot block runs the telemetry.
+      const s = new CrossdeckServer({
+        secretKey: "cd_sk_test_001",
+        sdkVersion: "0.1.0-test",
+        errorCapture: false,
+        flushOnExit: false,
+      });
+      // Let the constructor's setImmediate (heartbeat + boot telemetry) run.
+      await new Promise((r) => setImmediate(r));
+      await s.flush();
+
+      // Find the events POST and pull the sdk.boot event out of the batch.
+      const eventsCall = fetchSpy.mock.calls.find(([url]) =>
+        String(url).includes("/events"),
+      );
+      expect(eventsCall).toBeDefined();
+      const body = JSON.parse(String(eventsCall![1]!.body));
+      const bootEvent = (body.events as Array<{ name: string; properties: Record<string, unknown> }>)
+        .find((e) => e.name === "sdk.boot");
+      expect(bootEvent).toBeDefined();
+      // The aggregatable durability facts the backend pivots on.
+      expect(bootEvent!.properties["durability.entitlementStore"]).toBe(false);
+      expect(bootEvent!.properties["durability.coldStartDurable"]).toBe(false);
+      expect(bootEvent!.properties["durability.runtimeIsServerless"]).toBe(true);
+      expect(bootEvent!.properties["durability.runtimeHost"]).toBe("aws-lambda");
+    } finally {
+      delete process.env.AWS_LAMBDA_FUNCTION_NAME;
+      resetRuntimeInfoCache();
+    }
   });
 
   // ============================================================
@@ -1230,6 +1485,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
     });
     expect(s.diagnostics().secretKeyPrefix).toBe("cd_sk_test_****9999");
     expect(s.diagnostics().secretKeyPrefix).not.toContain("ABCDEFGHIJKL");
@@ -1354,6 +1610,7 @@ describe("CrossdeckServer", () => {
       secretKey: "cd_sk_test_001",
       sdkVersion: "0.1.0-test",
       flushOnExit: false,
+      bootHeartbeat: false,
       // errorCapture defaults to true
     });
     try {
@@ -1492,6 +1749,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
       testMode: true,
     });
     try {
@@ -1516,6 +1774,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
       onRequest: (info) => reqs.push(info.attempt),
       onResponse: (info) => ress.push(info.status),
     });
@@ -1550,6 +1809,7 @@ describe("CrossdeckServer", () => {
       sdkVersion: "0.1.0-test",
       errorCapture: false,
       flushOnExit: false,
+      bootHeartbeat: false,
       timeoutMs: 0,
       httpRetries: { maxAttempts: 1 }, // no retries — abort surfaces immediately
     });

@@ -182,16 +182,39 @@ function isInAppFrame(filename: string): boolean {
  * produce the same key". The Crossdeck backend may refine the grouping
  * further once source maps are uploaded.
  *
- * Input: the message + the first ≤3 in-app frames.
+ * Input: the message + the first ≤3 in-app frames. When no frames
+ * are available (non-Error throws of primitives, unhandledRejection
+ * of a value with no stack), the optional `location` fallback
+ * contributes filename/lineno/errorType so otherwise-identical
+ * generic messages from different call sites stay separate. Without
+ * the fallback they all collapse into one bucket and the dashboard
+ * can't distinguish them.
+ *
  * Output: an 8-char hex string usable as a doc id segment.
  */
-export function fingerprintError(message: string, frames: StackFrame[]): string {
+export function fingerprintError(
+  message: string,
+  frames: StackFrame[],
+  location?: {
+    filename?: string | null;
+    lineno?: number | null;
+    errorType?: string | null;
+  } | null,
+): string {
   const inAppFrames = frames.filter((f) => f.in_app).slice(0, 3);
-  const key = [
+  const parts = [
     (message || "").slice(0, 200),
     ...inAppFrames.map((f) => `${f.function}@${f.filename}:${f.lineno}`),
-  ].join("|");
-  return djb2Hex(key);
+  ];
+  if (inAppFrames.length === 0 && location) {
+    const loc = [
+      location.errorType ?? "",
+      location.filename ?? "",
+      location.lineno ?? "",
+    ].join(":");
+    if (loc !== "::") parts.push(loc);
+  }
+  return djb2Hex(parts.join("|"));
 }
 
 /**

@@ -118,4 +118,29 @@ describe("fingerprintError", () => {
     );
     expect(fingerprintError("boom", base)).toBe(fingerprintError("boom", extended));
   });
+
+  it("location fallback splits otherwise-identical empty-frame errors", () => {
+    // Regression: two `throw "boom"` calls from different middlewares
+    // used to collapse into one fingerprint because frames are empty
+    // and the message is identical.
+    const a = fingerprintError("boom", [], {
+      filename: "/app/middleware-a.js",
+      lineno: 10,
+    });
+    const b = fingerprintError("boom", [], {
+      filename: "/app/middleware-b.js",
+      lineno: 22,
+    });
+    expect(a).not.toBe(b);
+  });
+
+  it("location fallback is ignored when in-app frames are present", () => {
+    const frames = parseStack(`Error\n    at fn (/app/a.js:1:1)`);
+    const withLoc = fingerprintError("boom", frames, {
+      filename: "/anywhere.js",
+      lineno: 999,
+    });
+    const withoutLoc = fingerprintError("boom", frames);
+    expect(withLoc).toBe(withoutLoc);
+  });
 });

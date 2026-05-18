@@ -66,6 +66,7 @@ import type {
   Diagnostics,
   EntitlementMutationResult,
   EntitlementsListResponse,
+  EntitlementStore,
   Environment,
   ErrorLevel,
   EventProperties,
@@ -81,6 +82,7 @@ import type {
   RequestOptions,
   RevokeEntitlementInput,
   ServerEvent,
+  StoredEntitlements,
   SyncPurchaseInput,
 } from "./types";
 
@@ -137,6 +139,16 @@ export class CrossdeckServer extends EventEmitter {
   private readonly flushOnExit: FlushOnExit | null;
   private readonly superProps: SuperPropertyStore;
   private readonly entitlementCache: EntitlementCache;
+  /**
+   * Optional developer-supplied durable store for last-known-good
+   * entitlements (Redis / their DB / a KV). `undefined` when not
+   * configured — the SDK then has no cold-start durability on
+   * serverless, which it states explicitly at boot.
+   *
+   * Touched ONLY from the async `getEntitlements()` — never from the
+   * synchronous `isEntitled()`.
+   */
+  private readonly entitlementStore: EntitlementStore | null;
   private readonly debug: DebugLogger;
 
   /**
@@ -199,7 +211,9 @@ export class CrossdeckServer extends EventEmitter {
     this.superProps = new SuperPropertyStore();
     this.entitlementCache = new EntitlementCache({
       ttlMs: options.entitlementCacheTtlMs ?? 60_000,
+      staleAfterMs: options.entitlementStaleAfterMs,
     });
+    this.entitlementStore = options.entitlementStore ?? null;
     this.debug = options.debug === true ? new ConsoleDebugLogger() : new NullDebugLogger();
     if (options.debug === true) this.debug.enabled = true;
 
@@ -310,7 +324,84 @@ export class CrossdeckServer extends EventEmitter {
             { message: err instanceof Error ? err.message : String(err) },
           );
         });
+
+        // Durability posture — boot telemetry + the honest serverless
+        // warning. Scheduled alongside the boot heartbeat (same
+        // `setImmediate`, same `testMode` / `bootHeartbeat` opt-out)
+        // so the constructor returns before any phone-home runs and a
+        // caller reading `diagnostics()` synchronously after `new
+        // CrossdeckServer(...)` sees a clean buffer.
+        this.emitBootTelemetry();
       });
+    }
+  }
+
+  /**
+   * Emit the one-time `sdk.boot` telemetry event and, when the runtime
+   * is serverless with no `entitlementStore`, the honest "no cold-start
+   * durability" warning.
+   *
+   * Why a `track()` event and not the heartbeat: `GET /v1/sdk/heartbeat`
+   * carries no request body, so it cannot transport a structured
+   * `durability` fact. The event pipeline can — every `track()` event
+   * lands as an aggregatable document the backend can query, so
+   * Crossdeck can compute fleet-wide "% serverless-with-no-durable-
+   * store" from `sdk.boot` events (denominator = all `sdk.boot`,
+   * numerator = those with `durability.coldStartDurable === false`).
+   * The event rides the existing batched + retried + idempotent queue
+   * and is drained by flush-on-exit, so it survives a serverless
+   * teardown — it is NOT a local-only debug log.
+   *
+   * `isServerless` AND no store is the gap: a cold start begins with an
+   * empty in-memory cache and a brief Crossdeck outage in that window
+   * would read a paying customer as un-entitled. That gap is
+   * unavoidable without a store — so the SDK STATES it (a
+   * `sdk.no_durable_store` debug warning) rather than hiding it.
+   *
+   * Called once, from the deferred boot block — so it inherits the
+   * `testMode` / `bootHeartbeat:false` opt-outs and never fires before
+   * the constructor returns.
+   */
+  private emitBootTelemetry(): void {
+    const isServerless = this.runtime.isServerless;
+    const hasStore = this.entitlementStore !== null;
+    // coldStartDurable: a long-lived host keeps the process (hence the
+    // in-memory cache) warm between requests, so it is durable across a
+    // brief outage without a store. A serverless host is durable across
+    // a cold start ONLY with a store wired.
+    const coldStartDurable = hasStore || !isServerless;
+
+    // The honest warning — only in the actual gap case.
+    if (isServerless && !hasStore) {
+      this.debug.emit(
+        "sdk.no_durable_store",
+        `Running on a serverless host (${this.runtime.host}) with no entitlementStore. ` +
+          "The entitlement cache is in-memory only, so a cold start begins empty: " +
+          "if Crossdeck is briefly unreachable during that window, isEntitled() can " +
+          "read a paying customer as un-entitled. Wire `entitlementStore` (Redis / " +
+          "your DB / a KV) to close this gap.",
+        { host: this.runtime.host, isServerless, durableStore: false },
+      );
+    }
+
+    // One-time boot telemetry event. Fire-and-forget through track() —
+    // best-effort, never throws into the constructor. `durability.*`
+    // is the aggregatable fact the backend pivots on.
+    try {
+      this.track({
+        name: "sdk.boot",
+        anonymousId: this.processAnonymousId,
+        properties: {
+          "durability.entitlementStore": hasStore,
+          "durability.coldStartDurable": coldStartDurable,
+          "durability.runtimeIsServerless": isServerless,
+          "durability.runtimeHost": this.runtime.host,
+          "durability.entitlementCacheTtlMs": this.entitlementCache.ttl,
+        },
+      });
+    } catch {
+      // track() only throws on a missing event name — which cannot
+      // happen here. Defensive: boot telemetry must never crash boot.
     }
   }
 
@@ -383,16 +474,106 @@ export class CrossdeckServer extends EventEmitter {
   // to the same cache entry.
   // ============================================================
 
+  /**
+   * Fetch a customer's entitlements from Crossdeck and warm the cache.
+   *
+   * Durability — this is where last-known-good lives, NOT in the
+   * synchronous `isEntitled()`:
+   *   - On a SUCCESSFUL fetch: the entitlement cache is populated and,
+   *     if an `entitlementStore` is configured, the result is persisted
+   *     to it (`await store.save(...)`). The cache + store now hold
+   *     server-confirmed truth.
+   *   - On a network FAILURE: the cache is marked refresh-failed for the
+   *     customer (so `diagnostics()` shows the staleness), then — if a
+   *     store is configured — last-known-good is loaded back from it
+   *     (`await store.load(...)`). If the store yields a snapshot, the
+   *     cache is populated from it and that snapshot is RETURNED as a
+   *     normal `EntitlementsListResponse` — a cold-start / outage no
+   *     longer fails a paying customer. If there is no store, or the
+   *     store is empty, the network error is rethrown unchanged so the
+   *     caller still sees the failure.
+   *
+   * The store is touched only here, inside the `await` that already
+   * existed. `isEntitled()` remains a pure synchronous `Map` read.
+   */
   async getEntitlements(
     hints: IdentityHints,
     options?: RequestOptions,
   ): Promise<EntitlementsListResponse> {
-    const response = await this.http.request<EntitlementsListResponse>("GET", "/entitlements", {
-      query: this.identityPayload(hints),
-      signal: options?.signal,
-      timeoutMs: options?.timeoutMs,
-    });
+    let response: EntitlementsListResponse;
+    try {
+      response = await this.http.request<EntitlementsListResponse>("GET", "/entitlements", {
+        query: this.identityPayload(hints),
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      });
+    } catch (err) {
+      // The refresh failed (Crossdeck unreachable / transient error).
+      // Mark the customer stale so the staleness is visible via
+      // diagnostics(), never a silent unbounded window.
+      const failedCustomerId = this.resolveFailedRefreshCustomerId(hints);
+      if (failedCustomerId) {
+        this.entitlementCache.markRefreshFailed(failedCustomerId);
+      }
+      // Cold-start / outage fallback: try the durable store for last-
+      // known-good. A hit repopulates the cache and is returned as a
+      // normal response — the paying customer keeps access.
+      const recovered = await this.loadEntitlementsFromStore(hints);
+      if (recovered) {
+        const recoveredResponse: EntitlementsListResponse = {
+          object: "list",
+          data: recovered.entitlements,
+          crossdeckCustomerId: recovered.crossdeckCustomerId,
+          env: recovered.env,
+        };
+        this.populateEntitlementCache(hints, recoveredResponse);
+        // populateEntitlementCache → setForCustomer CLEARS the stale
+        // flag (it treats a populate as a successful refresh). But this
+        // was an OUTAGE fallback, not a fresh server read — Crossdeck is
+        // still down. Re-mark the customer stale so diagnostics() keeps
+        // showing the outage; the next genuinely-successful
+        // getEntitlements() clears it for real.
+        this.entitlementCache.markRefreshFailed(recovered.crossdeckCustomerId);
+        this.debug.emit(
+          "sdk.entitlement_store_recovered",
+          `Crossdeck unreachable — served ${recovered.crossdeckCustomerId} from the durable store ` +
+            `(${recovered.entitlements.length} entitlement(s), last refreshed ` +
+            `${new Date(recovered.savedAt).toISOString()}).`,
+          {
+            customerId: recovered.crossdeckCustomerId,
+            savedAt: recovered.savedAt,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+        return recoveredResponse;
+      }
+      // No store, or the store had nothing — the caller still sees the
+      // failure. If the cache was previously warm for this customer it
+      // keeps serving its own last-known-good via the synchronous
+      // isEntitled(); the customer is now flagged stale (visible in
+      // diagnostics()), which this signal makes explicit too.
+      if (failedCustomerId && this.entitlementCache.isStale(failedCustomerId)) {
+        this.debug.emit(
+          "sdk.entitlement_cache_stale",
+          `Crossdeck unreachable — entitlement cache for ${failedCustomerId} is now stale. ` +
+            (this.entitlementStore
+              ? "No durable snapshot was available to recover from."
+              : "No entitlementStore is configured, so there is no durable fallback.") +
+            " isEntitled() keeps serving last-known-good; staleness is visible in diagnostics().",
+          {
+            customerId: failedCustomerId,
+            durableStore: this.entitlementStore !== null,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
+      throw err;
+    }
     this.populateEntitlementCache(hints, response);
+    // Persist the fresh result so a future cold start / outage can
+    // recover it. Best-effort — a store write failure must not fail an
+    // otherwise-successful fetch.
+    await this.saveEntitlementsToStore(hints, response);
     return response;
   }
 
@@ -976,6 +1157,14 @@ export class CrossdeckServer extends EventEmitter {
         lastUpdated: this.entitlementCache.lastUpdated,
         ttlMs: this.entitlementCache.ttl,
         listenerErrors: this.entitlementCache.listenerErrors,
+        staleCustomers: this.entitlementCache.staleCustomerCount,
+        isStale: this.entitlementCache.isAnyStale,
+        lastRefreshFailedAt: this.entitlementCache.lastRefreshFailedAt,
+        durableStore: this.entitlementStore !== null,
+        // Cold-start durable iff a store is wired, OR the host is
+        // long-lived (the process, hence the in-memory cache, survives).
+        coldStartDurable:
+          this.entitlementStore !== null || !this.runtime.isServerless,
       },
       events: this.eventQueue.getStats(),
       errors: {
@@ -1255,6 +1444,101 @@ export class CrossdeckServer extends EventEmitter {
     }
   }
 
+  /**
+   * Persist a successful entitlements fetch to the durable store, if
+   * one is configured. No-op when there is no store.
+   *
+   * Saved under EVERY identity the caller might later look up by — the
+   * canonical `crossdeckCustomerId` plus any `userId` / `anonymousId`
+   * hint. The Node cache resolves a hint to a canonical ID via an
+   * in-memory alias map; on a cold start that map is empty, so a
+   * failure-path `load()` must be able to hit the store with the raw
+   * hint the caller passed. Saving under all keys makes that work.
+   *
+   * Best-effort: a store `save()` that throws is swallowed (logged in
+   * debug) — it weakens durability for that customer but must never
+   * fail an otherwise-successful `getEntitlements()`.
+   */
+  private async saveEntitlementsToStore(
+    hints: IdentityHints,
+    response: EntitlementsListResponse,
+  ): Promise<void> {
+    if (!this.entitlementStore) return;
+    const customerId = response.crossdeckCustomerId;
+    if (!customerId) return;
+    const snapshot: StoredEntitlements = {
+      v: 1,
+      crossdeckCustomerId: customerId,
+      entitlements: response.data,
+      env: response.env,
+      savedAt: Date.now(),
+    };
+    // Distinct keys only — dedupe so we don't write the same blob twice
+    // when e.g. the caller passed customerId === crossdeckCustomerId.
+    const keys = new Set<string>([customerId]);
+    if (hints.customerId) keys.add(hints.customerId);
+    if (hints.userId) keys.add(hints.userId);
+    if (hints.anonymousId) keys.add(hints.anonymousId);
+    for (const key of keys) {
+      try {
+        await this.entitlementStore.save(key, snapshot);
+      } catch (err) {
+        this.debug.emit(
+          "sdk.entitlement_store_recovered",
+          `entitlementStore.save failed for key ${key} — durability weakened for this customer.`,
+          { key, error: err instanceof Error ? err.message : String(err) },
+        );
+      }
+    }
+  }
+
+  /**
+   * Load last-known-good entitlements from the durable store on a
+   * network-failure path. Returns the first snapshot found across the
+   * caller's identity keys, or `null` if there is no store / no stored
+   * snapshot / every read failed.
+   *
+   * Tries the canonical `customerId` hint first, then `userId`, then
+   * `anonymousId` — the order callers most commonly key by. A corrupt
+   * or wrong-shaped blob is treated as a miss (the store is developer-
+   * supplied; the SDK validates rather than trusts).
+   */
+  private async loadEntitlementsFromStore(
+    hints: IdentityHints,
+  ): Promise<StoredEntitlements | null> {
+    if (!this.entitlementStore) return null;
+    const keys: string[] = [];
+    if (hints.customerId) keys.push(hints.customerId);
+    if (hints.userId) keys.push(hints.userId);
+    if (hints.anonymousId) keys.push(hints.anonymousId);
+    for (const key of keys) {
+      let loaded: StoredEntitlements | null = null;
+      try {
+        loaded = await this.entitlementStore.load(key);
+      } catch {
+        // A throwing load() degrades to "no durable copy for this key".
+        continue;
+      }
+      if (isValidStoredEntitlements(loaded)) return loaded;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the customer ID to stamp a failed-refresh marker against.
+   *
+   * Prefers a canonical ID the cache already knows (so the marker lands
+   * on the existing warm entry), then falls back to whatever raw hint
+   * the caller supplied — on a true cold-start failure there is no
+   * cache entry yet, and marking under the hint still makes "we tried
+   * for this customer and Crossdeck was down" observable.
+   */
+  private resolveFailedRefreshCustomerId(hints: IdentityHints): string | null {
+    const known = this.resolveCacheCustomerId(hints);
+    if (known) return known;
+    return hints.customerId ?? hints.userId ?? hints.anonymousId ?? null;
+  }
+
   private touchAlias(alias: string, customerId: string): void {
     // Delete-and-reinsert so the alias moves to the end of insertion
     // order (LRU "touch").
@@ -1375,6 +1659,33 @@ function sanitizePropertyBag(
       message: `${fieldName} could not be serialized.`,
     });
   }
+}
+
+/**
+ * Validate a value read back from a developer-supplied
+ * `EntitlementStore`. The store is external (Redis / a DB / a KV) and
+ * may return a corrupt, partial, stale-schema or attacker-influenced
+ * blob — the SDK validates the shape rather than trusting it. Anything
+ * that fails is treated as a cache miss (the SDK then rethrows the
+ * original network error), never a crash.
+ *
+ * Narrows to `StoredEntitlements`: a versioned blob with a non-empty
+ * `crossdeckCustomerId`, an `entitlements` array, and a known `env`.
+ * Individual entitlement objects are not deep-validated here — the
+ * cache + `isEntitled()` already tolerate odd entries (a missing `key`
+ * simply never matches), and `validUntil` is honoured at read time.
+ */
+function isValidStoredEntitlements(value: unknown): value is StoredEntitlements {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    v.v === 1 &&
+    typeof v.crossdeckCustomerId === "string" &&
+    v.crossdeckCustomerId.length > 0 &&
+    Array.isArray(v.entitlements) &&
+    (v.env === "production" || v.env === "sandbox") &&
+    typeof v.savedAt === "number"
+  );
 }
 
 /**

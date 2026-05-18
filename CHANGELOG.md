@@ -4,6 +4,44 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-18
+
+### Added
+
+- **Pluggable durable entitlement store (`entitlementStore`).** A new
+  constructor option taking an async `EntitlementStore` (a `load` /
+  `save` pair) — back it with Redis, your own database, or a KV. Every
+  successful `getEntitlements()` persists the result to it, and on a
+  network failure the SDK falls back to the stored snapshot. This is
+  what gives serverless deployments (Cloud Run / Lambda) cold-start
+  durability that an in-memory cache alone cannot. `EntitlementStore`
+  and `StoredEntitlements` are exported.
+- **Staleness fields in `diagnostics()`.** `entitlements.staleCustomers`,
+  `isStale`, `durableStore`, and `coldStartDurable` — so serving
+  last-known-good through a Crossdeck outage is observable, not silent.
+- **`sdk.no_durable_store` debug signal**, emitted once on a serverless
+  runtime with no `entitlementStore` configured, alongside a
+  `durability` fact on the boot telemetry event — so the cold-start gap
+  is measurable rather than a surprise in production.
+
+### Changed
+
+- **The entitlement cache is now durable last-known-good.**
+  `isEntitled()` and `list()` no longer expire to `false` / `[]` when
+  `entitlementCacheTtlMs` elapses — they keep serving the last
+  successfully-fetched entitlements. The TTL is now a refresh hint, not
+  an invalidation. Each entitlement is still honoured against its own
+  `validUntil`. A brief Crossdeck outage can no longer fail a paying
+  customer down to free 60 seconds after a warm.
+
+## [1.1.1] — 2026-05-14
+
+### Changed
+
+- Ported the "never silently surface an `Unknown` error" hardening to
+  `@cross-deck/node` — a captured error with no usable type or message
+  is now labelled precisely instead of collapsing to `Unknown error`.
+
 ## [1.1.0] — 2026-05-13
 
 ### Added

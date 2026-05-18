@@ -118,6 +118,118 @@ describe("captureError — manual API", () => {
   });
 });
 
+describe("captureError — non-Error payload coercion (post-1.0.1 upgrade)", () => {
+  it("plain object with message field preserves constructor name + extras", () => {
+    const { tracker, reports } = makeTracker();
+    class ApiError {
+      readonly code = 500;
+      readonly message = "server fell over";
+    }
+    try {
+      tracker.captureError(new ApiError());
+      expect(reports[0]!.message).toBe("server fell over");
+      expect(reports[0]!.errorType).toBe("ApiError");
+      expect((reports[0]!.context as Record<string, unknown>).__error_extras).toMatchObject({
+        code: 500,
+      });
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("null and undefined throws get explicit labels (not 'Unknown error')", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureError(null);
+      tracker.captureError(undefined);
+      expect(reports[0]!.message).toBe("(thrown: null)");
+      expect(reports[1]!.message).toBe("(thrown: undefined)");
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("Error.cause chain lands in extras", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      const root = new Error("ECONNREFUSED upstream");
+      const wrapper = new Error("payment service unreachable");
+      // ES2020 target — assign cause as a runtime field rather than
+      // using the ES2022 constructor option.
+      (wrapper as Error & { cause: unknown }).cause = root;
+      tracker.captureError(wrapper);
+      const extras = (reports[0]!.context as Record<string, unknown>).__error_extras as {
+        cause: Array<{ name: string; message: string }>;
+      };
+      expect(extras.cause).toEqual([{ name: "Error", message: "ECONNREFUSED upstream" }]);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("captures Node-style code/errno/syscall on Error subclasses", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      class SystemError extends Error {
+        readonly code = "ENOENT";
+        readonly errno = -2;
+        readonly syscall = "open";
+        readonly path = "/tmp/missing";
+        constructor(msg: string) {
+          super(msg);
+          this.name = "SystemError";
+        }
+      }
+      tracker.captureError(new SystemError("no such file"));
+      expect(reports[0]!.errorType).toBe("SystemError");
+      expect((reports[0]!.context as Record<string, unknown>).__error_extras).toMatchObject({
+        code: "ENOENT",
+        errno: -2,
+        syscall: "open",
+        path: "/tmp/missing",
+      });
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("AggregateError.errors is unwrapped into extras.aggregatedErrors", () => {
+    const { tracker, reports } = makeTracker();
+    try {
+      // Some test environments may not have AggregateError on globalThis.
+      const Agg = (globalThis as { AggregateError?: typeof AggregateError }).AggregateError;
+      if (!Agg) return;
+      const inner = [new Error("dns failed"), new Error("timeout")];
+      const agg = new Agg(inner, "All upstreams failed");
+      tracker.captureError(agg);
+      expect(reports[0]!.errorType).toBe("AggregateError");
+      const extras = (reports[0]!.context as Record<string, unknown>).__error_extras as {
+        aggregatedErrors: Array<{ name: string; message: string }>;
+      };
+      expect(extras.aggregatedErrors).toEqual([
+        { name: "Error", message: "dns failed" },
+        { name: "Error", message: "timeout" },
+      ]);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+
+  it("two non-Error throws of different shapes get DIFFERENT fingerprints", () => {
+    // Regression: the old code collapsed every empty-frame non-Error
+    // throw under a single fingerprint regardless of payload.
+    const { tracker, reports } = makeTracker();
+    try {
+      tracker.captureError({ code: 500, where: "a" });
+      tracker.captureError({ code: 500, where: "b" });
+      expect(reports).toHaveLength(2);
+      expect(reports[0]!.fingerprint).not.toBe(reports[1]!.fingerprint);
+    } finally {
+      tracker.uninstall();
+    }
+  });
+});
+
 describe("captureMessage — Sentry pattern", () => {
   it("captureMessage('hi', 'info') ships kind === 'error.message' with empty frames", () => {
     const { tracker, reports } = makeTracker();

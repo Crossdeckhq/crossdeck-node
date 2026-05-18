@@ -38,6 +38,28 @@ export type RuntimeHost =
   | "kubernetes"
   | "node";
 
+/**
+ * Hosts where a cold start begins with empty process memory — FaaS and
+ * serverless-container platforms that scale to zero and spin up a fresh
+ * instance per burst of traffic.
+ *
+ * Drives `RuntimeInfo.isServerless`. The entitlement-cache durability
+ * layer treats a host in this set with no `entitlementStore` as having
+ * no cold-start durability. Long-lived process hosts (Heroku, Render,
+ * Railway, Fly, Kubernetes, plain Node) are deliberately ABSENT — their
+ * process, and so the in-memory cache, survives between requests.
+ */
+const SERVERLESS_HOSTS: ReadonlySet<RuntimeHost> = new Set<RuntimeHost>([
+  "aws-lambda",
+  "azure-functions",
+  "google-app-engine",
+  "firebase-functions-v1",
+  "firebase-functions-v2",
+  "cloud-run",
+  "vercel",
+  "netlify",
+]);
+
 export interface RuntimeInfo {
   nodeVersion: string;
   /** `os.platform()` — "darwin" | "linux" | "win32" | … */
@@ -46,6 +68,22 @@ export interface RuntimeInfo {
   platformRelease: string;
   hostname: string;
   host: RuntimeHost;
+  /**
+   * Whether the host is a scale-to-zero / per-request-instance platform
+   * where a cold start begins with empty process memory.
+   *
+   * `true` for FaaS + serverless-container platforms (Lambda, Cloud
+   * Run, Firebase Functions v1/v2, Vercel, Netlify, Azure Functions,
+   * App Engine). `false` for long-lived process hosts (Heroku, Render,
+   * Railway, Fly, Kubernetes, plain Node) where the process — and thus
+   * the in-memory entitlement cache — persists across requests.
+   *
+   * The entitlement-cache durability layer reads this: a serverless
+   * host with no `entitlementStore` has no cold-start durability, and
+   * the SDK surfaces that explicitly (debug warning + a `durability`
+   * fact on the boot telemetry event).
+   */
+  isServerless: boolean;
   region: string | null;
   serviceName: string | null;
   serviceVersion: string | null;
@@ -102,6 +140,7 @@ function detect(options: RuntimeInfoOptions): RuntimeInfo {
     platformRelease: safeRelease(),
     hostname: safeHostname(),
     host: detected.host,
+    isServerless: SERVERLESS_HOSTS.has(detected.host),
     region: detected.region,
     serviceName: options.serviceName ?? detected.serviceName,
     serviceVersion: options.serviceVersion ?? detected.serviceVersion,

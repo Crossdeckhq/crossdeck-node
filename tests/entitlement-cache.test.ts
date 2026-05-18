@@ -33,7 +33,7 @@ describe("EntitlementCache — basic lookup", () => {
   });
 });
 
-describe("EntitlementCache — TTL behaviour", () => {
+describe("EntitlementCache — TTL is a refresh hint, not an invalidation", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -44,22 +44,108 @@ describe("EntitlementCache — TTL behaviour", () => {
     expect(c.isEntitled("cdcust_x", "pro")).toBe(true);
   });
 
-  it("after TTL elapses → isEntitled returns false (expired entry treated as cold)", () => {
+  it("after TTL elapses → isEntitled STILL returns true (serves last-known-good)", () => {
     vi.useFakeTimers();
     const c = new EntitlementCache({ ttlMs: 1000 });
     c.setForCustomer("cdcust_x", [entitlement("pro")]);
-    vi.advanceTimersByTime(1500);
+    vi.advanceTimersByTime(60_000);
+    // The TTL is only a refresh hint — a past-TTL entry keeps serving.
+    // An outage can never flip a paying customer to false.
+    expect(c.isEntitled("cdcust_x", "pro")).toBe(true);
+    expect(c.list("cdcust_x")).toHaveLength(1);
+  });
+
+  it("isEntitled honours each entitlement's OWN validUntil even mid-outage", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-18T00:00:00Z"));
+    const c = new EntitlementCache({ ttlMs: 1000 });
+    const nowSec = Date.now() / 1000;
+    const trial: PublicEntitlement = {
+      object: "entitlement",
+      key: "pro",
+      isActive: true,
+      validUntil: nowSec + 3600, // expires in 1h
+      source: { rail: "manual", productId: "p", subscriptionId: "s" },
+      updatedAt: Date.now(),
+    };
+    c.setForCustomer("cdcust_x", [trial]);
+    // Within validUntil — entitled even though the TTL elapsed.
+    vi.advanceTimersByTime(30 * 60_000);
+    expect(c.isEntitled("cdcust_x", "pro")).toBe(true);
+    // Past validUntil — the trial expiry still applies, no longer entitled.
+    vi.advanceTimersByTime(60 * 60_000);
     expect(c.isEntitled("cdcust_x", "pro")).toBe(false);
   });
 
-  it("isFresh reflects entry state through expiration", () => {
+  it("isFresh reflects the refresh-hint window (false past TTL)", () => {
     vi.useFakeTimers();
     const c = new EntitlementCache({ ttlMs: 1000 });
     expect(c.isFresh("cdcust_x")).toBe(false);
     c.setForCustomer("cdcust_x", [entitlement("pro")]);
     expect(c.isFresh("cdcust_x")).toBe(true);
     vi.advanceTimersByTime(1500);
+    // isFresh is now false — a re-fetch is DUE — but isEntitled stays true.
     expect(c.isFresh("cdcust_x")).toBe(false);
+    expect(c.needsRefresh("cdcust_x")).toBe(true);
+    expect(c.isEntitled("cdcust_x", "pro")).toBe(true);
+  });
+});
+
+describe("EntitlementCache — staleness signal", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("markRefreshFailed flags a warm customer stale without changing isEntitled", () => {
+    const c = new EntitlementCache();
+    c.setForCustomer("cdcust_x", [entitlement("pro")]);
+    expect(c.isStale("cdcust_x")).toBe(false);
+    c.markRefreshFailed("cdcust_x");
+    expect(c.isStale("cdcust_x")).toBe(true);
+    // Staleness NEVER changes the answer — last-known-good keeps serving.
+    expect(c.isEntitled("cdcust_x", "pro")).toBe(true);
+  });
+
+  it("a later successful refresh clears the stale flag", () => {
+    const c = new EntitlementCache();
+    c.setForCustomer("cdcust_x", [entitlement("pro")]);
+    c.markRefreshFailed("cdcust_x");
+    expect(c.isStale("cdcust_x")).toBe(true);
+    c.setForCustomer("cdcust_x", [entitlement("pro")]);
+    expect(c.isStale("cdcust_x")).toBe(false);
+  });
+
+  it("markRefreshFailed on a cold miss creates a marker-only stub (stale, not entitled)", () => {
+    const c = new EntitlementCache();
+    c.markRefreshFailed("cdcust_new");
+    expect(c.isStale("cdcust_new")).toBe(true);
+    // Nothing to serve — the stub has an empty entitlement set.
+    expect(c.isEntitled("cdcust_new", "pro")).toBe(false);
+  });
+
+  it("data aged past staleAfterMs is flagged stale even with no failed refresh", () => {
+    vi.useFakeTimers();
+    const c = new EntitlementCache({ ttlMs: 1000, staleAfterMs: 10_000 });
+    c.setForCustomer("cdcust_x", [entitlement("pro")]);
+    vi.advanceTimersByTime(5_000);
+    expect(c.isStale("cdcust_x")).toBe(false);
+    vi.advanceTimersByTime(10_000);
+    expect(c.isStale("cdcust_x")).toBe(true);
+    // Still serving last-known-good.
+    expect(c.isEntitled("cdcust_x", "pro")).toBe(true);
+  });
+
+  it("aggregate diagnostics — staleCustomerCount, isAnyStale, lastRefreshFailedAt", () => {
+    const c = new EntitlementCache();
+    c.setForCustomer("cdcust_x", [entitlement("pro")]);
+    c.setForCustomer("cdcust_y", [entitlement("pro")]);
+    expect(c.staleCustomerCount).toBe(0);
+    expect(c.isAnyStale).toBe(false);
+    expect(c.lastRefreshFailedAt).toBe(0);
+    c.markRefreshFailed("cdcust_y");
+    expect(c.staleCustomerCount).toBe(1);
+    expect(c.isAnyStale).toBe(true);
+    expect(c.lastRefreshFailedAt).toBeGreaterThan(0);
   });
 });
 

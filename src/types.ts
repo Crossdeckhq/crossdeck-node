@@ -40,6 +40,65 @@ export interface EntitlementsListResponse {
   env: Environment;
 }
 
+/**
+ * Snapshot of one customer's last-known-good entitlements, as written
+ * to / read from a durable `EntitlementStore`. Versioned for forward-
+ * compat — a future SDK can refuse a blob whose `v` it doesn't know.
+ *
+ * Carries enough to fully reconstruct an `EntitlementsListResponse` on
+ * a cold start (the durable read path in `getEntitlements()` rebuilds
+ * the response from this), plus `savedAt` so staleness is measurable
+ * after a process restart.
+ */
+export interface StoredEntitlements {
+  v: 1;
+  /** Canonical Crossdeck customer ID this snapshot belongs to. */
+  crossdeckCustomerId: string;
+  /** The entitlement set exactly as the server last returned it. */
+  entitlements: PublicEntitlement[];
+  env: Environment;
+  /** Epoch ms of the successful server fetch that produced this snapshot. */
+  savedAt: number;
+}
+
+/**
+ * Pluggable async durable store for last-known-good entitlements.
+ *
+ * The Node SDK's entitlement cache is an in-memory per-customer `Map`.
+ * On serverless (Cloud Run / AWS Lambda) a cold start is an empty Map,
+ * and a brief Crossdeck outage during that window would otherwise read
+ * a paying customer as un-entitled. An `EntitlementStore` is the
+ * developer-supplied durability layer — Redis, their primary DB, a KV —
+ * that survives both a cold start and an outage.
+ *
+ * Contract:
+ *   - `load` returns the most recent snapshot for a customer, or `null`
+ *     if none exists. It MUST NOT throw for a missing key — return
+ *     `null`. (The SDK additionally guards every call in a try/catch,
+ *     but a well-behaved store returns `null`.)
+ *   - `save` persists a snapshot. Called only after a SUCCESSFUL server
+ *     fetch, so the store never holds anything but server-confirmed
+ *     truth.
+ *   - Both are awaited inside `getEntitlements()` (already async). They
+ *     are NEVER called from the synchronous `isEntitled()` — that stays
+ *     a pure in-memory `Map` read with zero I/O.
+ *   - The SDK swallows store errors: a failed `save` never fails a
+ *     successful fetch, a failed `load` degrades to "no durable copy".
+ *     A broken store weakens durability; it never breaks the SDK.
+ *
+ * The `key` passed to `load` / `save` is whatever identity string the
+ * caller used — a canonical `crossdeckCustomerId`, or a developer
+ * `userId` / `anonymousId` hint. The SDK saves a snapshot under every
+ * identity it knows for a customer so a cold-start `load` succeeds even
+ * before the in-memory alias map is populated.
+ */
+export interface EntitlementStore {
+  /** Resolve a customer's last-known-good snapshot, or `null` if none. */
+  load(key: string): Promise<StoredEntitlements | null>;
+  /** Persist a customer's last-known-good snapshot. */
+  save(key: string, value: StoredEntitlements): Promise<void>;
+}
+
 export interface AliasResult {
   object: "alias_result";
   crossdeckCustomerId: string;
@@ -210,8 +269,48 @@ export interface CrossdeckServerOptions {
    *
    * Pass `0` to disable caching (every `isEntitled` requires a fresh
    * `getEntitlements()` call to populate the cache — useful for tests).
+   *
+   * NOTE: the TTL is a REFRESH HINT, not an invalidation. Once a
+   * customer is warm, `isEntitled()` keeps serving last-known-good past
+   * the TTL — a brief Crossdeck outage can never flip a paying customer
+   * to `false`. The TTL only tells `needsRefresh()` when a re-fetch is
+   * due, and (with no failed refresh) when the cache is flagged stale.
+   * Each entitlement's own `validUntil` is still honoured at read time.
    */
   entitlementCacheTtlMs?: number;
+
+  /**
+   * Age (ms) past which last-known-good entitlement data is flagged
+   * STALE in `diagnostics()` even with no failed refresh. Default 24h.
+   *
+   * Staleness never changes what `isEntitled()` returns — the cache
+   * keeps serving last-known-good. This window only makes "we have been
+   * serving an un-refreshed answer for a long time" observable, so an
+   * event-based revoke (chargeback / refund — which has no `validUntil`)
+   * riding out a long outage is visible instead of silent.
+   */
+  entitlementStaleAfterMs?: number;
+
+  /**
+   * Durable last-known-good store for entitlements. Optional.
+   *
+   * The entitlement cache is in-memory. On serverless (Cloud Run /
+   * Lambda) every cold start begins with an empty cache — and if
+   * Crossdeck is briefly unreachable during that window, a paying
+   * customer would read as un-entitled. Wiring an `EntitlementStore`
+   * (Redis / your DB / a KV) closes that gap: every successful
+   * `getEntitlements()` persists the result, and a network failure
+   * falls back to the stored snapshot instead of throwing.
+   *
+   * Without a store on a serverless host the SDK has NO cold-start
+   * durability — that is unavoidable and the SDK says so explicitly
+   * (a `debug.emit` warning plus a `durability` fact on the boot
+   * telemetry event). It is not hidden.
+   *
+   * `isEntitled()` stays synchronous regardless — the store is only
+   * ever touched from the already-async `getEntitlements()`.
+   */
+  entitlementStore?: EntitlementStore;
 
   // ============================================================
   // Cross-cutting — runtime enrichment + debug (v1.0.0+)
@@ -453,6 +552,32 @@ export interface Diagnostics {
     ttlMs: number;
     /** Cumulative count of listener invocations that threw. Swallowed inside the cache; surfaced here. */
     listenerErrors: number;
+    /**
+     * Number of cached customers currently flagged STALE — their most
+     * recent refresh attempt failed, or their data has aged past
+     * `entitlementStaleAfterMs`. The cache keeps serving last-known-good
+     * for them; this count makes "serving through an outage" observable.
+     */
+    staleCustomers: number;
+    /**
+     * Whether ANY cached customer is stale. Quick boolean for health
+     * checks / alerting without inspecting `staleCustomers`.
+     */
+    isStale: boolean;
+    /**
+     * Most recent failed-refresh timestamp across all customers (epoch
+     * ms), or 0 if every customer's last refresh succeeded.
+     */
+    lastRefreshFailedAt: number;
+    /**
+     * Durable-store posture. `durableStore` is true iff an
+     * `EntitlementStore` is configured. `coldStartDurable` is true iff
+     * the SDK has cold-start durability — which on a serverless host
+     * requires a store, and on a long-lived host is inherently true
+     * (the process, hence the in-memory cache, survives).
+     */
+    durableStore: boolean;
+    coldStartDurable: boolean;
   };
   events: {
     buffered: number;

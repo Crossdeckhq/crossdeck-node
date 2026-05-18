@@ -423,34 +423,34 @@ export class ErrorTracker {
     kind: CapturedError["kind"],
     level: ErrorLevel,
   ): CapturedError {
-    if (err instanceof Error) {
-      const frames = parseStack(err.stack);
-      return {
-        timestamp: Date.now(),
-        kind,
-        level,
-        message: String(err.message).slice(0, 1024),
-        errorType: err.name,
-        frames,
-        rawStack: err.stack ?? null,
-        fingerprint: fingerprintError(err.message, frames),
-        breadcrumbs: this.opts.breadcrumbs.snapshot(),
-        context: this.opts.getContext(),
-        tags: this.opts.getTags(),
-      };
-    }
-    const message = safeStringify(err).slice(0, 1024);
+    const payload = coerceErrorPayload(err);
+    const message = (payload.message || "Unknown error").slice(0, 1024);
+    const stack = err instanceof Error ? err.stack ?? null : null;
+    const frames = parseStack(stack);
+    const errorType = payload.errorType ?? null;
+
+    const context = payload.extras
+      ? { ...this.opts.getContext(), __error_extras: payload.extras }
+      : this.opts.getContext();
+
     return {
       timestamp: Date.now(),
       kind,
       level,
       message,
-      errorType: null,
-      frames: [],
-      rawStack: null,
-      fingerprint: fingerprintError(message, []),
+      errorType,
+      frames,
+      rawStack: stack,
+      // Location fallback ensures distinct call sites stay separate
+      // even when the message is generic and there are no parseable
+      // frames (e.g. `throw "boom"` from a middleware).
+      fingerprint: fingerprintError(message, frames, {
+        filename: frames[0]?.filename ?? null,
+        lineno: frames[0]?.lineno ?? null,
+        errorType,
+      }),
       breadcrumbs: this.opts.breadcrumbs.snapshot(),
-      context: this.opts.getContext(),
+      context,
       tags: this.opts.getTags(),
     };
   }
@@ -471,7 +471,10 @@ export class ErrorTracker {
         errorType: "HTTPError",
         frames: [],
         rawStack: null,
-        fingerprint: fingerprintError(`HTTP ${info.status} ${info.method}`, []),
+        fingerprint: fingerprintError(`HTTP ${info.status} ${info.method}`, [], {
+          filename: info.url,
+          errorType: "HTTPError",
+        }),
         breadcrumbs: this.opts.breadcrumbs.snapshot(),
         context: this.opts.getContext(),
         tags: this.opts.getTags(),
@@ -598,13 +601,217 @@ export class ErrorTracker {
   }
 }
 
-function safeStringify(v: unknown): string {
-  if (v == null) return String(v);
-  if (typeof v === "string") return v;
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return Object.prototype.toString.call(v);
+/**
+ * The thrown-value coercer.
+ *
+ * Node's error pipelines (process.on('uncaughtException'),
+ * process.on('unhandledRejection'), developer `throw`) hand us values
+ * of every shape — Error instances, AggregateError, plain objects,
+ * primitives, even null. Earlier versions of this code wrote "Unknown
+ * error" whenever the value wasn't an Error with a non-empty
+ * `.message`, which silently collapsed entire classes of real bugs
+ * into one unhelpful bucket.
+ *
+ * Returns three pieces (never throws):
+ *
+ *   - message:   human-readable headline, never empty for any
+ *                non-null/non-undefined input
+ *   - errorType: constructor name when discoverable (Error subclass,
+ *                AggregateError, custom class)
+ *   - extras:    additional fields worth keeping (Error.cause chain,
+ *                .code/.errno/.statusCode/.response on common Node
+ *                patterns, AggregateError.errors[], any enumerable
+ *                own properties on an Error subclass). Stashed on
+ *                context.__error_extras for the dashboard's "raw
+ *                event" panel.
+ */
+interface CoercedPayload {
+  message: string;
+  errorType: string | null;
+  extras: Record<string, unknown> | null;
+}
+
+function coerceErrorPayload(v: unknown): CoercedPayload {
+  if (v === null) return { message: "(thrown: null)", errorType: null, extras: null };
+  if (v === undefined) return { message: "(thrown: undefined)", errorType: null, extras: null };
+
+  if (typeof v === "string") {
+    return { message: v, errorType: null, extras: null };
   }
+  if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") {
+    return { message: String(v), errorType: typeof v, extras: null };
+  }
+  if (typeof v === "symbol") {
+    return { message: v.toString(), errorType: "symbol", extras: null };
+  }
+  if (typeof v === "function") {
+    return { message: `(thrown function: ${v.name || "anonymous"})`, errorType: "function", extras: null };
+  }
+
+  // Error instances — including AggregateError (Node 16+, thrown by
+  // Promise.any when all inputs reject).
+  if (v instanceof Error) {
+    const errorType = v.name || v.constructor?.name || "Error";
+    const message =
+      typeof v.message === "string" && v.message.length > 0
+        ? v.message
+        : safeToString(v) || errorType;
+
+    const extras: Record<string, unknown> = {};
+
+    // ES2022 Error.cause — walk up to 5 levels so a service-layer
+    // wrapper error doesn't hide the underlying network failure.
+    const causeChain = collectCauseChain(v);
+    if (causeChain.length > 0) extras.cause = causeChain;
+
+    // AggregateError carries an `errors` array of the underlying
+    // rejections. Without surfacing this, the user just sees
+    // "AggregateError: All promises were rejected" with no clue
+    // which one failed.
+    const aggErrors = (v as unknown as { errors?: unknown }).errors;
+    if (Array.isArray(aggErrors)) {
+      extras.aggregatedErrors = aggErrors.slice(0, 10).map((inner) => {
+        if (inner instanceof Error) {
+          return { name: inner.name || "Error", message: inner.message || "" };
+        }
+        return { name: "non-Error", message: safeToString(inner) };
+      });
+    }
+
+    // Common Node error patterns attach code / errno / syscall /
+    // statusCode / response to thrown values. Capture them without
+    // forcing every wrapper class to override toString.
+    for (const key of [
+      "code", "errno", "syscall", "path",
+      "status", "statusCode", "response", "data", "detail", "details",
+    ] as const) {
+      const val = (v as unknown as Record<string, unknown>)[key];
+      if (val !== undefined && typeof val !== "function") {
+        extras[key] = safeClone(val);
+      }
+    }
+
+    // Any other enumerable own properties (custom Error subclasses
+    // that add fields).
+    for (const key of Object.keys(v)) {
+      if (key === "message" || key === "stack" || key === "name" || key === "cause" || key === "errors") continue;
+      if (key in extras) continue;
+      const val = (v as unknown as Record<string, unknown>)[key];
+      if (typeof val === "function") continue;
+      extras[key] = safeClone(val);
+    }
+
+    return {
+      message,
+      errorType,
+      extras: Object.keys(extras).length > 0 ? extras : null,
+    };
+  }
+
+  // Response — fetch().then(r => { if (!r.ok) throw r }) is a common
+  // Node 18+ pattern (built-in fetch), and the bare Response is
+  // otherwise unreadable.
+  if (typeof Response !== "undefined" && v instanceof Response) {
+    return {
+      message: `HTTP ${v.status} ${v.statusText || ""}${v.url ? ` ${v.url}` : ""}`.trim(),
+      errorType: "Response",
+      extras: { status: v.status, statusText: v.statusText, url: v.url, type: v.type },
+    };
+  }
+
+  // Plain objects / custom classes that don't extend Error.
+  if (typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    const ctorName =
+      (obj.constructor && typeof obj.constructor === "function" && (obj.constructor as { name?: string }).name) ||
+      null;
+
+    const ownMessage = typeof obj.message === "string" && obj.message ? obj.message : null;
+    const ownName = typeof obj.name === "string" && obj.name ? obj.name : null;
+
+    let jsonForm: string | null = null;
+    try {
+      const serialised = JSON.stringify(obj);
+      jsonForm = serialised === "{}" ? null : serialised;
+    } catch {
+      jsonForm = null;
+    }
+
+    const fallbackString = safeToString(obj);
+    const message =
+      ownMessage ??
+      jsonForm ??
+      (fallbackString && fallbackString !== "[object Object]" ? fallbackString : null) ??
+      (ctorName ? `(thrown ${ctorName} with no message)` : "(thrown object with no message)");
+
+    const errorType = ownName ?? ctorName ?? null;
+
+    const extras: Record<string, unknown> = {};
+    let count = 0;
+    for (const key of Object.keys(obj)) {
+      if (count >= 20) break;
+      if (key === "message" || key === "name") continue;
+      const val = obj[key];
+      if (typeof val === "function") continue;
+      extras[key] = safeClone(val);
+      count++;
+    }
+
+    return {
+      message,
+      errorType,
+      extras: Object.keys(extras).length > 0 ? extras : null,
+    };
+  }
+
+  return { message: safeToString(v) || "(unstringifiable thrown value)", errorType: null, extras: null };
+}
+
+function collectCauseChain(err: Error): Array<{ name: string; message: string }> {
+  const out: Array<{ name: string; message: string }> = [];
+  let cur: unknown = (err as Error & { cause?: unknown }).cause;
+  let depth = 0;
+  while (cur != null && depth < 5) {
+    if (cur instanceof Error) {
+      out.push({ name: cur.name || "Error", message: cur.message || "" });
+      cur = (cur as Error & { cause?: unknown }).cause;
+    } else {
+      out.push({ name: "non-Error", message: safeToString(cur) });
+      cur = null;
+    }
+    depth++;
+  }
+  return out;
+}
+
+function safeToString(v: unknown): string {
+  try {
+    const s = Object.prototype.toString.call(v);
+    if (s !== "[object Object]") return s;
+    const own = (v as { toString?: () => unknown })?.toString;
+    if (typeof own === "function" && own !== Object.prototype.toString) {
+      const r = own.call(v);
+      if (typeof r === "string") return r;
+    }
+    return s;
+  } catch {
+    return "(throwing toString)";
+  }
+}
+
+function safeClone(v: unknown): unknown {
+  if (v == null) return v;
+  const t = typeof v;
+  if (t === "string" || t === "number" || t === "boolean") return v;
+  if (t === "bigint") return String(v);
+  try {
+    const s = JSON.stringify(v);
+    return s === undefined ? safeToString(v) : JSON.parse(s);
+  } catch {
+    return safeToString(v);
+  }
+}
+
+function safeStringify(v: unknown): string {
+  return coerceErrorPayload(v).message;
 }
