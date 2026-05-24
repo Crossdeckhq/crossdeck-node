@@ -4,6 +4,17 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] — 2026-05-24
+
+Patch fix for the 1.3.0 dist-load contract. Mirrors the
+`@cross-deck/web@1.3.1` patch — `SDK_VERSION` is now sourced from a
+generated `src/_version.ts` file (produced by
+`scripts/sync-sdk-versions.mjs` from `package.json`) instead of a
+runtime `import { version } from "../package.json"` that needs a
+`with { type: "json" }` assertion to load as ESM. Wire contract is
+unchanged. 1.3.0 was never published to npm; 1.3.1 is the first
+1.3.x line to reach npm.
+
 ## [1.3.0] — 2026-05-24
 
 KPMG bank-grade audit closure. Six review batches landed five SDK PRs
