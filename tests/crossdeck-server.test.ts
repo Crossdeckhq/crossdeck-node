@@ -251,6 +251,10 @@ describe("CrossdeckServer", () => {
     const body = JSON.parse(init.body as string);
     expect(body.appId).toBe("app_web_123");
     expect(body.sdk).toEqual({ name: "@cross-deck/node", version: "0.1.0-test" });
+    // P1 #11 — envelope ships `environment` (parity with web). Backend
+    // cross-checks against the API-key-derived env and rejects
+    // mismatches loudly (env_mismatch).
+    expect(body.environment).toBe("sandbox");
     expect(body.events[0].eventId).toMatch(/^evt_/);
     expect(body.events[0].timestamp).toEqual(expect.any(Number));
   });
@@ -816,6 +820,29 @@ describe("CrossdeckServer", () => {
     });
   });
 
+  it("syncPurchases() — explicit rail: undefined still defaults to apple (P1 #15 spread-order regression)", async () => {
+    // Pre-fix `{ rail: input.rail ?? "apple", ...input }` — the
+    // `...input` spread runs LAST and overrides the default when the
+    // caller passes `rail: undefined` explicitly. New order
+    // `{ ...input, rail }` puts the default last so it wins.
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        object: "purchase_result",
+        crossdeckCustomerId: "cdcust_123",
+        env: "sandbox",
+        entitlements: [],
+      }),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    await server().syncPurchases({
+      rail: undefined as unknown as "apple",
+      signedTransactionInfo: "signed_txn",
+    });
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
+    expect(body.rail).toBe("apple"); // pre-fix this was `undefined`
+  });
+
   it("grantEntitlement() posts to the server grant route", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse({
@@ -1166,6 +1193,44 @@ describe("CrossdeckServer", () => {
     expect(server().isEntitled({ userId: "user_1" }, "pro")).toBe(false);
   });
 
+  it("isEntitled(string) ONLY treats cdcust_-prefixed strings as canonical (P1 #19 cross-tenant guard)", async () => {
+    // Pre-fix `resolveCacheCustomerId(string)` returned the string
+    // as-is whenever the cache had ANY entry under that key — so if
+    // tenant A's userId happened to collide with tenant B's
+    // crossdeckCustomerId, A's call resolved to B's cached
+    // entitlements. New contract: non-`cdcust_`-prefixed strings drop
+    // straight to alias lookup, never to canonical-id treatment.
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({
+        object: "list",
+        data: [
+          {
+            object: "entitlement",
+            key: "pro",
+            isActive: true,
+            validUntil: null,
+            source: { rail: "manual", productId: "p", subscriptionId: "s" },
+            updatedAt: 1,
+          },
+        ],
+        crossdeckCustomerId: "cdcust_collision",
+        env: "sandbox",
+      }),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const s = server();
+    await s.getEntitlements({ customerId: "cdcust_collision" });
+    // Warm-cache check: canonical prefix resolves.
+    expect(s.isEntitled("cdcust_collision", "pro")).toBe(true);
+    // Non-prefixed string (the hypothetical collider — looks like a
+    // userId / arbitrary key) must NOT resolve through the canonical
+    // path even though the cache has an entry under the same lookup
+    // string. Returns false because there's no alias mapping for it.
+    expect(s.isEntitled("user_unknown", "pro")).toBe(false);
+    expect(s.isEntitled("legacy_id_42", "pro")).toBe(false);
+  });
+
   it("onEntitlementsChange listener fires after getEntitlements populates the cache", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(
       jsonResponse({
@@ -1427,6 +1492,38 @@ describe("CrossdeckServer", () => {
     } finally {
       delete process.env.AWS_LAMBDA_FUNCTION_NAME;
       resetRuntimeInfoCache();
+    }
+  });
+
+  it("durability warning fires even when bootHeartbeat:false (P1 #9 regression — warning is local-only, decoupled from phone-home opt-out)", async () => {
+    // Pre-fix the warning lived inside emitBootTelemetry() which sat
+    // inside the bootHeartbeat gate, so any developer who set
+    // bootHeartbeat:false (common in serverless test / CI / no-phone-
+    // home setups) silently disabled the entire reason
+    // entitlementStore exists.
+    process.env.AWS_LAMBDA_FUNCTION_NAME = "fn-warning-decoupled";
+    resetRuntimeInfoCache();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const s = new CrossdeckServer({
+        secretKey: "cd_sk_test_001",
+        sdkVersion: "0.1.0-test",
+        errorCapture: false,
+        flushOnExit: false,
+        bootHeartbeat: false, // ← the opt-out that pre-fix silenced the warning
+        debug: true, // surface the warning to console.info
+      });
+      // Synchronous fire — no setImmediate dependency.
+      const warningLine = infoSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((line) => line.includes("sdk.no_durable_store"));
+      expect(warningLine).toBeDefined();
+      expect(warningLine).toContain("entitlementStore");
+      void s; // silence unused
+    } finally {
+      delete process.env.AWS_LAMBDA_FUNCTION_NAME;
+      resetRuntimeInfoCache();
+      infoSpy.mockRestore();
     }
   });
 

@@ -20,7 +20,7 @@
  *     name: "checkout.started",
  *     developerUserId: userId,
  *     properties: scrubPiiFromProperties({
- *       url: req.url, // might contain "/users/wes@…/" — gets [email]
+ *       url: req.url, // might contain "/users/wes@…/" — gets <email>
  *       lastError: e.message, // might contain card numbers
  *     }),
  *   });
@@ -44,33 +44,38 @@ const EMAIL_PATTERN =
  *
  * Anchored on a digit at both ends so trailing separators (space /
  * hyphen) aren't pulled into the match — otherwise
- * "4242 4242 4242 4242 today" would scrub as "[card]today" instead of
- * "[card] today".
+ * "4242 4242 4242 4242 today" would scrub as "<card>today" instead of
+ * "<card> today".
  */
 const CARD_PATTERN = /\b\d(?:[ -]?\d){12,18}\b/g;
 
-const REPLACEMENT_EMAIL = "[email]";
-const REPLACEMENT_CARD = "[card]";
+// Sentinel tokens — aligned with backend/src/api/lib/scrub.ts which uses
+// <email>, <card>, <uuid>, <cdcust>, <crossdeck_secret_key>, <aws_access_key>.
+// Mismatched tokens between the SDK scrub and the backend's defence-in-
+// depth scrub would split dashboard aggregation (the same event arriving
+// from two paths would carry two different sentinels).
+const REPLACEMENT_EMAIL = "<email>";
+const REPLACEMENT_CARD = "<card>";
 
 /**
  * Scrub a single string value: replace email-shaped substrings with
- * `[email]` and card-number-shaped substrings with `[card]`. Returns
- * the original string (===) when nothing matched, so callers can do
- * an identity-check to skip allocating a new event copy.
+ * `<email>` and card-number-shaped substrings with `<card>`. Returns
+ * the original string (===) when nothing matched.
+ *
+ * Implementation note: we call `.replace()` unconditionally rather than
+ * gating on `.test()`. The /g regexes are module-level so `.test()`
+ * carries `lastIndex` state between calls — a prior match leaves
+ * `lastIndex` mid-string and the next `.test()` can falsely return
+ * false on a string that DOES match. `.replace(/g)` always scans the
+ * full string regardless of `lastIndex`, so dropping the test-guard
+ * removes the sharp edge at zero cost (when nothing matches, replace
+ * returns the same `(===)` string).
  */
 export function scrubPii(value: string): string {
   if (!value) return value;
-  let out = value;
-  if (EMAIL_PATTERN.test(out)) {
-    out = out.replace(EMAIL_PATTERN, REPLACEMENT_EMAIL);
-  }
-  // Reset regex lastIndex (global flag carries state between calls).
-  EMAIL_PATTERN.lastIndex = 0;
-  if (CARD_PATTERN.test(out)) {
-    out = out.replace(CARD_PATTERN, REPLACEMENT_CARD);
-  }
-  CARD_PATTERN.lastIndex = 0;
-  return out;
+  return value
+    .replace(EMAIL_PATTERN, REPLACEMENT_EMAIL)
+    .replace(CARD_PATTERN, REPLACEMENT_CARD);
 }
 
 /**

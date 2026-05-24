@@ -506,3 +506,158 @@ describe("EventQueue — overflow + lifecycle", () => {
     expect(info.delayMs).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("EventQueue — permanent failure on 4xx (P0 #6)", () => {
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function jsonError(status: number, code: string): Response {
+    return new Response(
+      JSON.stringify({ error: { type: "invalid_request_error", code, message: `HTTP ${status}` } }),
+      { status, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  it("drops the batch and fires onPermanentFailure on 401 (key revoked)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonError(401, "invalid_api_key")) as unknown as typeof fetch;
+
+    const onDrop = vi.fn();
+    const onPermanentFailure = vi.fn();
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 2,
+      intervalMs: 10_000,
+      envelope,
+      // The captured scheduler captures BOTH the idle-flush schedule
+      // (fired by the first enqueue when buffer length < batchSize)
+      // AND any retry schedules. We don't care about the idle one —
+      // we care that the queue didn't schedule a RETRY after the
+      // permanent failure. `getStats().nextRetryAt === null` is the
+      // canonical signal for that.
+      scheduler: () => () => {},
+      onDrop,
+      onPermanentFailure,
+    });
+    q.enqueue(makeEvent("a"));
+    q.enqueue(makeEvent("b"));
+    await q.flush();
+    expect(onDrop).toHaveBeenCalledWith(2);
+    expect(onPermanentFailure).toHaveBeenCalledTimes(1);
+    const info = onPermanentFailure.mock.calls[0]![0];
+    expect(info.status).toBe(401);
+    expect(info.droppedCount).toBe(2);
+    // CRITICAL: no retry scheduled — the whole point of the fix.
+    expect(q.getStats().nextRetryAt).toBeNull();
+    expect(q.getStats().consecutiveFailures).toBe(0);
+    expect(q.getStats().buffered).toBe(0);
+    expect(q.getStats().inFlight).toBe(0);
+    expect(q.getStats().dropped).toBe(2);
+    expect(q.pendingIdempotencyKey).toBeNull();
+  });
+
+  it("drops on 400 (malformed batch)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonError(400, "invalid_event")) as unknown as typeof fetch;
+    const onPermanentFailure = vi.fn();
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 1,
+      intervalMs: 10_000,
+      envelope,
+      scheduler: captureScheduler().scheduler,
+      onPermanentFailure,
+    });
+    q.enqueue(makeEvent("a"));
+    await q.flush();
+    expect(onPermanentFailure).toHaveBeenCalledTimes(1);
+    expect(onPermanentFailure.mock.calls[0]![0].status).toBe(400);
+  });
+
+  it("RETAINS the batch on 408 (transient timeout — retryable)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonError(408, "request_timeout")) as unknown as typeof fetch;
+    const sched = captureScheduler();
+    const onPermanentFailure = vi.fn();
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 1,
+      intervalMs: 10_000,
+      envelope,
+      scheduler: sched.scheduler,
+      onPermanentFailure,
+    });
+    q.enqueue(makeEvent("a"));
+    await q.flush();
+    expect(onPermanentFailure).not.toHaveBeenCalled();
+    expect(sched.callCount).toBe(1);
+    expect(q.getStats().inFlight).toBe(1);
+    expect(q.pendingIdempotencyKey).toMatch(/^batch_/);
+  });
+
+  it("RETAINS the batch on 429 (rate-limited — retryable, honours Retry-After)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { type: "rate_limit_error", code: "rate_limited", message: "slow" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": "3" },
+      }),
+    ) as unknown as typeof fetch;
+    const sched = captureScheduler();
+    const onPermanentFailure = vi.fn();
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 1,
+      intervalMs: 10_000,
+      envelope,
+      scheduler: sched.scheduler,
+      onPermanentFailure,
+    });
+    q.enqueue(makeEvent("a"));
+    await q.flush();
+    expect(onPermanentFailure).not.toHaveBeenCalled();
+    expect(sched.last?.ms).toBe(3_000); // honours server Retry-After
+  });
+
+  it("RETAINS the batch on a 5xx (server error — retryable)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonError(500, "internal_server_error")) as unknown as typeof fetch;
+    const sched = captureScheduler();
+    const onPermanentFailure = vi.fn();
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 1,
+      intervalMs: 10_000,
+      envelope,
+      scheduler: sched.scheduler,
+      onPermanentFailure,
+    });
+    q.enqueue(makeEvent("a"));
+    await q.flush();
+    expect(onPermanentFailure).not.toHaveBeenCalled();
+    expect(sched.callCount).toBe(1);
+    expect(q.getStats().inFlight).toBe(1);
+  });
+
+  it("RETAINS the batch on a network error (no status — retryable)", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
+    const sched = captureScheduler();
+    const onPermanentFailure = vi.fn();
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 1,
+      intervalMs: 10_000,
+      envelope,
+      scheduler: sched.scheduler,
+      onPermanentFailure,
+    });
+    q.enqueue(makeEvent("a"));
+    await q.flush();
+    // Conservative default: only flag permanent on clear 4xx evidence.
+    expect(onPermanentFailure).not.toHaveBeenCalled();
+    expect(sched.callCount).toBe(1);
+    expect(q.getStats().inFlight).toBe(1);
+  });
+});

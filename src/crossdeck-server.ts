@@ -48,6 +48,7 @@ import { BreadcrumbBuffer, type Breadcrumb, type BreadcrumbCategory } from "./br
 import {
   DEFAULT_ERROR_CAPTURE,
   ErrorTracker,
+  extractSelfHostname,
   type CapturedError,
   type ErrorCaptureConfig,
 } from "./error-capture";
@@ -233,6 +234,11 @@ export class CrossdeckServer extends EventEmitter {
       intervalMs: options.eventFlushIntervalMs ?? 1500,
       envelope: (): BatchEnvelope => ({
         appId: this.appId,
+        // Ship env on every batch so the backend can cross-check
+        // against the API-key-derived env and reject mismatches
+        // loudly (env_mismatch). Web has always done this; node now
+        // matches so defence-in-depth is symmetric across SDKs.
+        environment: this.env,
         sdk: { name: SDK_NAME, version: this.sdkVersion },
       }),
       onDrop: (count) => {
@@ -246,6 +252,27 @@ export class CrossdeckServer extends EventEmitter {
           error: info.lastError,
           attempt: info.consecutiveFailures,
           nextRetryMs: info.delayMs,
+        });
+      },
+      onPermanentFailure: (info) => {
+        // Bank-grade rule: a permanent 4xx that's dropping events MUST
+        // be loud regardless of debug mode. Pre-fix the queue retried
+        // 4xx forever silently and the customer never knew their key
+        // was revoked. console.error fires unconditionally; the debug
+        // signal lets ops dashboards detect + surface the problem too;
+        // the event-emitter signal lets host-app code listen and page.
+        const headline = `[crossdeck] Event batch DROPPED (status ${info.status}): ${info.lastError}. ${info.droppedCount} event(s) lost — check your secret key + app config.`;
+        // eslint-disable-next-line no-console
+        console.error(headline);
+        this.debug.emit(
+          "sdk.flush_permanent_failure",
+          headline,
+          { ...info },
+        );
+        this.emit("queue.permanent_failure", {
+          status: info.status,
+          droppedCount: info.droppedCount,
+          error: info.lastError,
         });
       },
       onFirstFlushSuccess: () => {
@@ -268,16 +295,20 @@ export class CrossdeckServer extends EventEmitter {
         report: (err) => this.reportCapturedError(err),
         getContext: () => ({ ...this.errorContext }),
         getTags: () => ({ ...this.errorTags }),
-        beforeSend: null, // wired via setErrorBeforeSend; ErrorTracker reads it through the live ref below
+        // GETTER, not a captured value — `setErrorBeforeSend()` mutates
+        // `this.errorBeforeSend` after init() and the tracker MUST pick
+        // up the new hook on the next error. Pre-fix we worked around
+        // a captured-by-value field with `Object.defineProperty` on the
+        // tracker's private opts; the contract is now a real getter so
+        // we just hand it the closure and the hack is gone.
+        beforeSend: () => this.errorBeforeSend,
         isConsented: () => true,
-      });
-      // Indirect through `this.errorBeforeSend` so `setErrorBeforeSend`
-      // takes effect on subsequent reports without re-installing the
-      // tracker.
-      const trackerOpts = (this.errorTracker as unknown as { opts: { beforeSend: ((e: CapturedError) => CapturedError | null) | null } }).opts;
-      Object.defineProperty(trackerOpts, "beforeSend", {
-        get: () => this.errorBeforeSend,
-        configurable: true,
+        // Derived from the configured baseUrl at construction time.
+        // Used by the fetch wrapper to skip captureHttp on Crossdeck's
+        // own requests — pre-fix the skip was hardcoded to
+        // `api.cross-deck.com` and broke for customers on staging /
+        // regional / self-hosted base URLs (recursive capture loop).
+        selfHostname: extractSelfHostname(this.baseUrl),
       });
       this.errorTracker.install();
     }
@@ -311,6 +342,17 @@ export class CrossdeckServer extends EventEmitter {
     // setting bootHeartbeat=false explicitly. Errors are swallowed so
     // a broken backend / bad key / firewall never crashes the caller's
     // process — heartbeat is diagnostic-grade, not load-bearing.
+    // Durability warning fires UNCONDITIONALLY (regardless of
+    // bootHeartbeat / testMode opt-outs) because it is a local-only
+    // debug signal — no network call, no phone-home. Pre-fix it sat
+    // inside `emitBootTelemetry()` which sat inside the bootHeartbeat
+    // gate, so a developer who set `bootHeartbeat: false` (common in
+    // serverless-test setups, CI scripts, and customers who don't want
+    // the boot phone-home) silently disabled the entire reason
+    // `entitlementStore` exists. Audit P1 #9: warning must surface
+    // independently of the heartbeat opt-out.
+    this.emitDurabilityWarning();
+
     if (options.testMode !== true && options.bootHeartbeat !== false) {
       // setImmediate lets the constructor return first so the caller's
       // code reaches the next statement before we kick off the network
@@ -325,32 +367,22 @@ export class CrossdeckServer extends EventEmitter {
           );
         });
 
-        // Durability posture — boot telemetry + the honest serverless
-        // warning. Scheduled alongside the boot heartbeat (same
-        // `setImmediate`, same `testMode` / `bootHeartbeat` opt-out)
-        // so the constructor returns before any phone-home runs and a
-        // caller reading `diagnostics()` synchronously after `new
-        // CrossdeckServer(...)` sees a clean buffer.
-        this.emitBootTelemetry();
+        // Boot telemetry phone-home — the aggregatable `sdk.boot`
+        // event. Stays inside the bootHeartbeat gate (the durability
+        // WARNING above is local; this is a track() that hits the
+        // wire). Same `testMode` / `bootHeartbeat` opt-out as the
+        // heartbeat itself.
+        this.emitBootTelemetryEvent();
       });
     }
   }
 
   /**
-   * Emit the one-time `sdk.boot` telemetry event and, when the runtime
-   * is serverless with no `entitlementStore`, the honest "no cold-start
-   * durability" warning.
-   *
-   * Why a `track()` event and not the heartbeat: `GET /v1/sdk/heartbeat`
-   * carries no request body, so it cannot transport a structured
-   * `durability` fact. The event pipeline can — every `track()` event
-   * lands as an aggregatable document the backend can query, so
-   * Crossdeck can compute fleet-wide "% serverless-with-no-durable-
-   * store" from `sdk.boot` events (denominator = all `sdk.boot`,
-   * numerator = those with `durability.coldStartDurable === false`).
-   * The event rides the existing batched + retried + idempotent queue
-   * and is drained by flush-on-exit, so it survives a serverless
-   * teardown — it is NOT a local-only debug log.
+   * Emit the honest "no cold-start durability" warning when the runtime
+   * is serverless AND no `entitlementStore` is wired. Local-only debug
+   * signal — no network call, no phone-home. Safe to fire from the
+   * constructor before `setImmediate` because there is no I/O on this
+   * path.
    *
    * `isServerless` AND no store is the gap: a cold start begins with an
    * empty in-memory cache and a brief Crossdeck outage in that window
@@ -358,20 +390,15 @@ export class CrossdeckServer extends EventEmitter {
    * unavoidable without a store — so the SDK STATES it (a
    * `sdk.no_durable_store` debug warning) rather than hiding it.
    *
-   * Called once, from the deferred boot block — so it inherits the
-   * `testMode` / `bootHeartbeat:false` opt-outs and never fires before
-   * the constructor returns.
+   * Audit P1 #9: this used to live INSIDE `emitBootTelemetry()` which
+   * itself sat inside the `bootHeartbeat` gate, so any developer who
+   * set `bootHeartbeat: false` silently disabled the entire reason
+   * `entitlementStore` exists. Now split: warning fires
+   * unconditionally; the boot phone-home stays gated.
    */
-  private emitBootTelemetry(): void {
+  private emitDurabilityWarning(): void {
     const isServerless = this.runtime.isServerless;
     const hasStore = this.entitlementStore !== null;
-    // coldStartDurable: a long-lived host keeps the process (hence the
-    // in-memory cache) warm between requests, so it is durable across a
-    // brief outage without a store. A serverless host is durable across
-    // a cold start ONLY with a store wired.
-    const coldStartDurable = hasStore || !isServerless;
-
-    // The honest warning — only in the actual gap case.
     if (isServerless && !hasStore) {
       this.debug.emit(
         "sdk.no_durable_store",
@@ -383,10 +410,34 @@ export class CrossdeckServer extends EventEmitter {
         { host: this.runtime.host, isServerless, durableStore: false },
       );
     }
+  }
+
+  /**
+   * Emit the one-time `sdk.boot` telemetry event — the aggregatable
+   * fact the backend pivots on (compute fleet-wide
+   * "% serverless-with-no-durable-store"). Rides the batched + retried
+   * + idempotent queue and is drained by flush-on-exit, so it survives
+   * a serverless teardown.
+   *
+   * Why a `track()` event and not the heartbeat: `GET /v1/sdk/heartbeat`
+   * carries no request body, so it cannot transport a structured
+   * `durability` fact.
+   *
+   * Gated by `bootHeartbeat` (and `testMode`) because it IS a phone-
+   * home — the unconditional surface is `emitDurabilityWarning()`,
+   * which has no network call.
+   */
+  private emitBootTelemetryEvent(): void {
+    const isServerless = this.runtime.isServerless;
+    const hasStore = this.entitlementStore !== null;
+    // coldStartDurable: a long-lived host keeps the process (hence the
+    // in-memory cache) warm between requests, so it is durable across a
+    // brief outage without a store. A serverless host is durable across
+    // a cold start ONLY with a store wired.
+    const coldStartDurable = hasStore || !isServerless;
 
     // One-time boot telemetry event. Fire-and-forget through track() —
-    // best-effort, never throws into the constructor. `durability.*`
-    // is the aggregatable fact the backend pivots on.
+    // best-effort, never throws into the constructor.
     try {
       this.track({
         name: "sdk.boot",
@@ -842,8 +893,17 @@ export class CrossdeckServer extends EventEmitter {
         message: "syncPurchases requires a signedTransactionInfo string.",
       });
     }
+    // Spread input FIRST so the explicit `rail` default below WINS.
+    // Pre-fix order was `{ rail: input.rail ?? "apple", ...input }`
+    // — but `...input` runs LAST and overrides the default with the
+    // caller's literal `rail` key, including the case where the
+    // caller passes `rail: undefined` explicitly (TypeScript treats
+    // an undefined-typed property as "key present"). Reversing the
+    // order so the default sits last fixes both the explicit-undefined
+    // case AND the omitted-key case in one line.
+    const rail = input.rail ?? "apple";
     return this.http.request<PurchaseResult>("POST", "/purchases/sync", {
-      body: { rail: input.rail ?? "apple", ...input },
+      body: { ...input, rail },
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
     });
@@ -1555,12 +1615,26 @@ export class CrossdeckServer extends EventEmitter {
    * Resolve any hint shape (canonical customerId / userId hint /
    * anonymousId hint / raw string) to a `crossdeckCustomerId` if we
    * have a cache entry for it.
+   *
+   * String overload is STRICT on the canonical-id shape. Pre-fix
+   * `isFresh(raw)` treated any string with a cache entry as a valid
+   * canonical id — if tenant A's userId happened to collide with
+   * tenant B's crossdeckCustomerId, A's call would resolve to B's
+   * cached entitlements. Bounded by the `cdcust_` prefix convention
+   * (which both SDKs and the backend mint, see
+   * backend/src/lib/customers.ts) — anything else is treated purely
+   * as an alias lookup, never as a canonical id. Audit P1 #19.
    */
   private resolveCacheCustomerId(hint: IdentityHints | string): string | null {
     if (typeof hint === "string") {
-      // String input is treated as a canonical customerId first, then
-      // as an alias (a customer's developerUserId / anonymousId).
-      if (this.entitlementCache.isFresh(hint)) return hint;
+      // Canonical-shape check FIRST: only `cdcust_…`-prefixed strings
+      // are eligible to be returned as-is. Non-prefixed strings drop
+      // straight to the alias map — no cross-tenant primitive even if
+      // a stray cache entry exists for the same string under a
+      // different prefix family.
+      if (hint.startsWith("cdcust_") && this.entitlementCache.isFresh(hint)) {
+        return hint;
+      }
       return this.customerIdAliases.get(hint) ?? null;
     }
     if (hint.customerId) return hint.customerId;

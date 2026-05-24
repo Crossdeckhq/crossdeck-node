@@ -4,12 +4,12 @@ import * as cd from "../src/index";
 import { scrubPii, scrubPiiFromProperties } from "../src/consent";
 
 describe("scrubPii — string utility", () => {
-  it("replaces an email-shaped substring with [email]", () => {
-    expect(scrubPii("contact me at wes@pinet.co.za")).toBe("contact me at [email]");
+  it("replaces an email-shaped substring with <email>", () => {
+    expect(scrubPii("contact me at wes@pinet.co.za")).toBe("contact me at <email>");
   });
 
-  it("replaces a card-number-shaped sequence with [card]", () => {
-    expect(scrubPii("card 4242 4242 4242 4242 charged")).toBe("card [card] charged");
+  it("replaces a card-number-shaped sequence with <card>", () => {
+    expect(scrubPii("card 4242 4242 4242 4242 charged")).toBe("card <card> charged");
   });
 
   it("returns the original string (===) when nothing matched", () => {
@@ -19,11 +19,11 @@ describe("scrubPii — string utility", () => {
 
   it("preserves trailing whitespace around scrubbed sequences", () => {
     // Anchor-on-digit ensures separators don't get pulled into the match.
-    expect(scrubPii("4242 4242 4242 4242 today")).toBe("[card] today");
+    expect(scrubPii("4242 4242 4242 4242 today")).toBe("<card> today");
   });
 
   it("scrubs multiple emails in one string", () => {
-    expect(scrubPii("from a@x.com to b@y.com")).toBe("from [email] to [email]");
+    expect(scrubPii("from a@x.com to b@y.com")).toBe("from <email> to <email>");
   });
 });
 
@@ -35,7 +35,7 @@ describe("scrubPiiFromProperties — walk utility", () => {
         plan: "pro",
       }),
     ).toEqual({
-      url: "/users/[email]/profile",
+      url: "/users/<email>/profile",
       plan: "pro",
     });
   });
@@ -46,7 +46,7 @@ describe("scrubPiiFromProperties — walk utility", () => {
         emails: ["a@x.com", "b@y.com"],
       }),
     ).toEqual({
-      emails: ["[email]", "[email]"],
+      emails: ["<email>", "<email>"],
     });
   });
 
@@ -66,7 +66,7 @@ describe("scrubPiiFromProperties — walk utility", () => {
         request: { url: "/users/wes@pinet.co.za/", method: "GET" },
       }),
     ).toEqual({
-      request: { url: "/users/[email]/", method: "GET" },
+      request: { url: "/users/<email>/", method: "GET" },
     });
   });
 

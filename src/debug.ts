@@ -37,6 +37,11 @@ export type DebugSignal =
   | "sdk.sensitive_property_warning"
   | "sdk.property_coerced"
   | "sdk.flush_retry_scheduled"
+  // Emitted when the queue drops a batch because the server returned
+  // a permanent 4xx (key revoked, malformed batch, etc.). Always loud,
+  // regardless of debug mode — see the console.error in
+  // crossdeck-server.ts.
+  | "sdk.flush_permanent_failure"
   | "sdk.flush_on_exit_started"
   | "sdk.flush_on_exit_completed"
   | "sdk.webhook_verified"

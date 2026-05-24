@@ -69,6 +69,16 @@ export interface QueuedEvent {
 export interface BatchEnvelope {
   /** Optional appId. The server is authoritative via the API key; this is metadata only. */
   appId?: string;
+  /**
+   * Declared environment ("production" / "sandbox"). The backend
+   * cross-checks this against the API-key-derived env and rejects
+   * mismatches loudly (env_mismatch) — catches the "live key, env:
+   * sandbox in caller code" config drift before it pollutes the
+   * wrong dashboard. Web has always sent this; node now matches so
+   * defence-in-depth is symmetric across SDKs (cross-SDK parity P1
+   * audit finding).
+   */
+  environment?: "production" | "sandbox";
   sdk: { name: string; version: string };
 }
 
@@ -105,6 +115,23 @@ export interface EventQueueConfig {
     delayMs: number;
     consecutiveFailures: number;
     retryAfterMs?: number;
+    lastError: string;
+  }) => void;
+  /**
+   * Fired when the queue DROPS a batch because the server returned a
+   * permanent 4xx (anything except 408 Request Timeout / 429 Too Many
+   * Requests). The host SDK should surface this loudly — pre-fix the
+   * queue retried 4xx errors forever with the same Idempotency-Key,
+   * silently growing the backlog while the customer thought events
+   * were landing. Common causes:
+   *   - 401: secret key revoked / rotated
+   *   - 403: lacking permission for the project
+   *   - 400/422: malformed batch (schema mismatch, oversized event)
+   *   - 404: endpoint doesn't exist (typo'd baseUrl)
+   */
+  onPermanentFailure?: (info: {
+    status: number;
+    droppedCount: number;
     lastError: string;
   }) => void;
 }
@@ -216,6 +243,12 @@ export class EventQueue {
         sdk: env.sdk,
       };
       if (env.appId) body.appId = env.appId;
+      // environment ships when the host SDK supplied one (server SDKs
+      // know their env from init() options). Backend cross-checks it
+      // against the API-key-derived env and rejects mismatches loudly
+      // (env_mismatch) — defence-in-depth so a "live key, env: sandbox"
+      // misconfig doesn't pollute the wrong dashboard. Parity with web.
+      if (env.environment) body.environment = env.environment;
       const result = await this.cfg.http.request<IngestResponse>("POST", "/events", {
         body,
         idempotencyKey: batchId,
@@ -232,12 +265,34 @@ export class EventQueue {
       }
       return result;
     } catch (err) {
-      // Keep `pendingBatch` + `pendingBatchId` set — the next
-      // scheduler-driven (or caller-driven) flush will retry with the
-      // SAME key. This is the Idempotency-Key reuse contract.
       const message = err instanceof Error ? err.message : String(err);
       this.lastError = message;
 
+      // Permanent failures (4xx except 408/429) are NOT retryable. The
+      // server is telling us our request is malformed (400/422), our
+      // key is revoked (401), we lack permission (403), or the endpoint
+      // doesn't exist (404). Retrying with the same Idempotency-Key
+      // forever just grows the queue silently while the customer thinks
+      // events are landing. Drop the batch loudly.
+      if (isPermanent4xx(err)) {
+        const droppedCount = batch.length;
+        this.pendingBatch = null;
+        this.pendingBatchId = null;
+        this.inFlight -= droppedCount;
+        this.dropped += droppedCount;
+        this.cfg.onDrop?.(droppedCount);
+        this.cfg.onPermanentFailure?.({
+          status: (err as { status?: number }).status ?? 0,
+          droppedCount,
+          lastError: message,
+        });
+        return null;
+      }
+
+      // Retryable failure (5xx / network / 408 / 429). Keep
+      // `pendingBatch` + `pendingBatchId` set — the next
+      // scheduler-driven (or caller-driven) flush will retry with the
+      // SAME key. This is the Idempotency-Key reuse contract.
       const retryAfterMs = extractRetryAfterMs(err);
       const delay = this.retry.nextDelay(retryAfterMs);
       this.scheduleRetry(delay);
@@ -326,6 +381,26 @@ function extractRetryAfterMs(err: unknown): number | undefined {
     return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
   }
   return undefined;
+}
+
+/**
+ * True when the error represents a permanent 4xx response that
+ * SHOULDN'T be retried. Excludes 408 Request Timeout and 429 Too Many
+ * Requests — both indicate transient state where the SAME request
+ * (with the SAME Idempotency-Key) can succeed on a retry.
+ *
+ * Anything that isn't a CrossdeckError-shaped object with a numeric
+ * status field returns false (network errors / fetch failures fall
+ * here — those ARE retryable). Conservative default: only flag as
+ * permanent when we have strong evidence from the server.
+ */
+function isPermanent4xx(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const status = (err as { status?: unknown }).status;
+  if (typeof status !== "number" || !Number.isFinite(status)) return false;
+  if (status < 400 || status >= 500) return false;
+  if (status === 408 || status === 429) return false;
+  return true;
 }
 
 /**

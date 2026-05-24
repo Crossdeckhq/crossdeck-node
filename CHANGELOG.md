@@ -4,6 +4,97 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-24
+
+KPMG bank-grade audit closure. Six review batches landed five SDK PRs
+and a backend wiring fix that closes every P0 plus 12 of 13 P1 findings.
+No public method renames; one internal contract change
+(`ErrorTracker.beforeSend` is now a getter) that also removes the
+`Object.defineProperty` workaround the node SDK shipped to compensate
+for the same broken contract on web. Behavioural changes to the queue
+and the PII scrub strictly improve correctness. The wire
+`Crossdeck-Sdk-Version` header now reads from `package.json` so it
+cannot drift from the published bundle.
+
+### Fixed (P0)
+
+- **PII scrub sentinel tokens aligned with the backend.** `[email]` /
+  `[card]` → `<email>` / `<card>`, matching `backend/src/api/lib/scrub.ts`.
+  The same event scrubbed by SDK + backend now carries the same
+  sentinel — dashboard aggregation works again.
+- **`setErrorBeforeSend` contract cleaned up.** The
+  `ErrorTracker.beforeSend` field is now a getter
+  (`() => fn | null`). Removed the `Object.defineProperty` hack on
+  `tracker.opts` that worked around the old captured-by-value bug —
+  cleaner contract, lockstep with web.
+- **Event queue drops 4xx batches.** Pre-fix every `catch` triggered
+  `scheduleRetry` with the same `Idempotency-Key`. A 401 (key revoked),
+  400/422 (malformed batch), 403 (permission), 404 (wrong baseUrl)
+  spun the retry timer indefinitely while the backlog grew silently.
+  New `isPermanent4xx()` helper hard-stops on any 4xx EXCEPT 408 / 429
+  (transient by spec). On permanent failure: drop the batch, increment
+  `dropped`, fire `onPermanentFailure(info)`, emit
+  `queue.permanent_failure` on the EventEmitter, log via
+  `console.error` regardless of debug mode.
+- **Error-capture self-skip derived from `baseUrl`.** Pre-fix hardcoded
+  to `api.cross-deck.com`; customers on staging / regional / self-hosted
+  base URLs recursed (5xx → captureHttp → enqueue → /events →
+  captureHttp → ∞). Now strict-hostname compare against `selfHostname`
+  extracted from constructor `baseUrl`. Closes the substring-match
+  bypass (`api.cross-deck.com.attacker.example` would have matched).
+
+### Added
+
+- **`onPermanentFailure` callback** on `EventQueueConfig`, surfaced
+  via `CrossdeckServer.on("queue.permanent_failure", …)` for host-app
+  paging.
+- **`sdk.flush_permanent_failure` debug signal** in the
+  `DebugSignal` vocabulary.
+
+### Changed
+
+- **`SDK_VERSION` is now imported from `package.json`.** The
+  `Crossdeck-Sdk-Version` header always matches the published bundle.
+  Single source of truth.
+- **Event ingest envelope now ships `environment`.** Pre-fix web sent
+  it and node didn't; backend `v1-events.ts` cross-checks it against
+  the API-key-derived env and rejects mismatches loudly
+  (`env_mismatch`). Defence-in-depth so a "live key, env: sandbox"
+  misconfig fails fast instead of polluting the wrong dashboard.
+- **`syncPurchases` body spread bug.** Pre-fix
+  `{ rail: input.rail ?? "apple", ...input }` — the `...input` ran
+  LAST and overrode the default when the caller passed
+  `rail: undefined` explicitly. Reversed: `{ ...input, rail }`.
+- **PII scrub regex uses `.replace()` unconditionally.** Dropped the
+  `.test()`-gating that carried `lastIndex` state between calls.
+- **`bootHeartbeat: false` no longer silences the
+  `sdk.no_durable_store` warning.** Pre-fix the warning lived inside
+  `emitBootTelemetry()` which sat inside the `bootHeartbeat` gate, so
+  the opt-out silenced the entire reason `entitlementStore` exists.
+  Split into two methods: `emitDurabilityWarning()` (local-only,
+  unconditional) and `emitBootTelemetryEvent()` (phone-home, still
+  gated).
+- **`isEntitled(string)` requires the `cdcust_` prefix** for canonical-
+  path resolution. Pre-fix any string with a cache entry resolved
+  through the canonical path — a small cross-tenant primitive if a
+  tenant's userId collided with another tenant's `crossdeckCustomerId`.
+  Non-prefixed strings now drop to alias lookup only.
+- **Self-skip applies to breadcrumbs too**, not just `captureHttp`.
+  Error reports no longer carry noisy `POST https://api.cross-deck.com/v1/events`
+  crumb entries.
+
+### Wiring (backend, paired)
+
+- **`v1-events` ingest now honours the per-project `piiAllowList`.**
+  The admin management surface (`v1-pii-allow-list.ts`) was persisted +
+  audit-logged but the hot ingest path never read it. The new
+  `backend/src/api/lib/pii-allow-list-cache.ts` (60s TTL,
+  single-flight) feeds the project's allow-list to `scrubProperties()`
+  on every batch. `HARD_LOCKED_PATTERNS` are always stripped from the
+  effective list regardless of what's in storage. (Backend-only —
+  listed here so server-SDK consumers know defence-in-depth is fully
+  closed.)
+
 ## [1.2.0] — 2026-05-18
 
 ### Added
