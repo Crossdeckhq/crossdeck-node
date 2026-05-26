@@ -397,6 +397,14 @@ new CrossdeckServer({
 
 POST methods (`track`/`ingest`/`syncPurchases`/`grantEntitlement`/`revokeEntitlement`) DO NOT auto-retry at the HTTP layer. Retries happen via the event queue with per-batch `Idempotency-Key` reuse — the server can dedupe replays.
 
+**v1.4.0 — `syncPurchases` deterministic key.** The Idempotency-Key
+on `syncPurchases` is derived from the request body (UUID-shaped
+SHA-256 of `crossdeck:purchases/sync:<rail>:<jws|token>`). Two retries
+of the same Apple transaction land on the same key, so the backend
+short-circuits with `idempotent_replay: true` instead of
+double-processing. Override via `options.idempotencyKey` only when
+an outer orchestrator needs a different idempotency window.
+
 ### AbortSignal — caller-controlled cancellation
 
 Every async method accepts a final `RequestOptions?` with `{ signal, timeoutMs }`:
@@ -413,6 +421,60 @@ try {
   }
 }
 ```
+
+### PII scrubber (v1.4.0 — parity with Web/RN/Swift)
+
+Every `track()` payload runs through `scrubPiiFromProperties`
+before enqueue — email-shaped and card-number-shaped substrings
+are rewritten to `<email>` / `<card>` sentinels recursively
+across nested objects + arrays. **Default: on.** Pre-v1.4.0 the
+Node SDK was the only one that skipped this, shipping payloads
+UNREDACTED despite the README promising parity.
+
+Opt out only for regulator-required audit trails where the raw
+value must be preserved:
+
+```ts
+new CrossdeckServer({ secretKey, scrubPii: false });
+```
+
+**Blast radius:** every `track()` payload — event names with
+embedded emails, trait values, group memberships, error context
+blobs — ships verbatim to Crossdeck and downstream warehouses /
+analytics exports. Document the decision at the call site.
+
+### Shutdown — flush before exit (v1.4.0 contract)
+
+The server holds a buffered event queue. A clean teardown MUST
+flush the buffer before dropping it, otherwise events queued
+between the last flush and shutdown are silently lost.
+
+**Three teardown paths, three contracts:**
+
+| Method | Flushes? | Use when |
+| ------ | -------- | -------- |
+| `await server.shutdown()` | YES — awaits internal `flush()` then tears down | Default. Use this in graceful-shutdown handlers. |
+| `await using server = ...` + `[Symbol.asyncDispose]` | YES — equivalent to `await server.shutdown()` | TC39 explicit-resource-management blocks. |
+| `server.shutdownSync()` / `using` + `[Symbol.dispose]` | NO — drops the buffer | ONLY when the runtime cannot await (signal handlers, process.exit fallthrough). |
+
+```ts
+// Graceful shutdown (recommended)
+process.on("SIGTERM", async () => {
+  await server.shutdown();
+  process.exit(0);
+});
+
+// Explicit-resource-management (Node 20+ / TS 5.2+)
+{
+  await using server = new CrossdeckServer({ secretKey });
+  // ... use server ...
+} // [Symbol.asyncDispose] fires here, awaits flush
+```
+
+`shutdownSync()` (and the sync `[Symbol.dispose]` that wraps it)
+logs a `console.warn` with the dropped-event count whenever the
+buffer is non-empty at sync-teardown time — silent loss is
+incompatible with the bank-grade contract.
 
 ### EventEmitter — internal events
 

@@ -126,6 +126,10 @@ export interface PurchaseResult {
   crossdeckCustomerId: string;
   env: Environment;
   entitlements: PublicEntitlement[];
+  /** True when the response came from the backend's idempotency
+   * cache instead of fresh processing. Backend also returns
+   * `Idempotent-Replayed: true` as a response header (v1.4.0). */
+  idempotent_replay?: boolean;
 }
 
 /**
@@ -182,6 +186,26 @@ export interface CrossdeckServerOptions {
    * not the source of truth.
    */
   appId?: string;
+
+  /**
+   * Apply Crossdeck's PII scrubber to every `track()` payload before
+   * enqueue. Default `true` (parity with Web / RN / Swift SDKs — Node
+   * pre-v1.4.0 was the odd one out and SHIPPED EMAILS UNREDACTED, a
+   * privacy contract drift versus the README claim).
+   *
+   * The scrubber rewrites email-shaped and card-number-shaped
+   * substrings to `<email>` / `<card>` sentinels recursively across
+   * nested maps + arrays. See `scrubPii` / `scrubPiiFromProperties`.
+   *
+   * **Blast radius of setting `false`:** every `track()` payload —
+   * including event names with embedded emails ("user wes@example.com
+   * upgraded"), trait values, group memberships, error context blobs
+   * — ships verbatim to Crossdeck and downstream warehouses /
+   * analytics exports. Disable only for explicit compliance use
+   * cases (regulator-required audit trails where the raw value MUST
+   * be preserved) and document the decision at the call site.
+   */
+  scrubPii?: boolean;
 
   // ============================================================
   // USP 1 — Error capture (v1.0.0+)
@@ -421,6 +445,14 @@ export interface RequestOptions {
    * `timeoutMs`. Pass `0` to disable.
    */
   timeoutMs?: number;
+  /**
+   * Override the deterministic Idempotency-Key derivation (v1.4.0).
+   * The SDK derives a stable key from the request body so retries
+   * collapse on the backend. Override only when an outer
+   * orchestrator (job runner, retry harness) needs a different
+   * idempotency window — and document why at the call site.
+   */
+  idempotencyKey?: string;
 }
 
 export interface IdentityHints {

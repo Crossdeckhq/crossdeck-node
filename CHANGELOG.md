@@ -4,6 +4,26 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-05-26
+
+**Bank-grade reconciliation release.** 6-pillar KPMG-style audit closed across SDK + backend. Every behavioural guarantee registered in the monorepo's `contracts/` directory with a CI-enforced audit job.
+
+### Added
+
+- **PII scrubber applied on `track()` enqueue path** — parity with Web/RN/Swift. Pre-1.4.0 Node was the ONLY SDK that skipped this, shipping payloads UNREDACTED. New `scrubPii?: boolean` option (default true); explicit false opt-out preserves raw payloads for regulator-required audit trails.
+- **Deterministic `Idempotency-Key` on `syncPurchases()`** — same JWS/purchaseToken → same key. New `options.idempotencyKey` override for outer orchestrators.
+- **`PurchaseResult.idempotent_replay?: boolean`** — true when the backend replayed a cached response.
+- **`purchase.completed` event on every successful `syncPurchases()`** — funnel parity with Swift/Android auto-track.
+- **Distinguishable webhook verifier error codes** — pre-1.4.0 collapsed everything into `webhook_invalid_signature`. New: `webhook_signature_mismatch` (wrong-secret signal), `webhook_timestamp_outside_tolerance` (replay-attack signal — alert separately), `webhook_timestamp_missing`, `webhook_payload_not_json`, `webhook_invalid_tolerance`. Legacy codes deprecated with migration notes.
+- **Webhook verifier rejects footgun tolerances** — `Infinity` / `NaN` / negative / above-24h-cap now throw `webhook_invalid_tolerance` instead of silently disabling replay protection.
+- **15 backend-emitted error codes** added to the `crossdeck-error-codes.json` catalogue with Stripe-style remediation guidance.
+
+### Changed (breaking)
+
+- **`shutdown()` signature changed from `(reason) => void` to `(reason) => Promise<void>`.** Awaits `flush()` before tearing down the queue. Pre-1.4.0 it called `eventQueue.reset()` synchronously — every event between the last flush and shutdown was silently dropped. New `shutdownSync()` for callers that genuinely cannot await (signal handlers); it logs `console.warn` with the dropped-event count if the buffer is non-empty.
+- **Default event-queue flush interval is now 2000ms** (was 1500ms) — cross-SDK parity.
+- **`[Symbol.dispose]` now warns when dropping queued events.** Use `await using` + `[Symbol.asyncDispose]` (or `await server.shutdown()`) for proper drainage.
+
 ## [1.3.1] — 2026-05-24
 
 Patch fix for the 1.3.0 dist-load contract. Mirrors the

@@ -43,7 +43,7 @@ describe("verifyWebhookSignature — happy path", () => {
 });
 
 describe("verifyWebhookSignature — rejections", () => {
-  it("tampered payload throws CrossdeckError({ code: 'webhook_invalid_signature' })", () => {
+  it("tampered payload throws CrossdeckError({ code: 'webhook_signature_mismatch' })", () => {
     const orig = '{"x":1}';
     const header = makeHeader(orig, SECRET, NOW);
     try {
@@ -51,11 +51,11 @@ describe("verifyWebhookSignature — rejections", () => {
       throw new Error("expected to throw");
     } catch (err) {
       expect(err).toBeInstanceOf(CrossdeckError);
-      expect((err as CrossdeckError).code).toBe("webhook_invalid_signature");
+      expect((err as CrossdeckError).code).toBe("webhook_signature_mismatch");
     }
   });
 
-  it("tampered signature throws webhook_invalid_signature", () => {
+  it("tampered signature throws webhook_signature_mismatch", () => {
     const payload = '{"x":1}';
     const ts = Math.floor(NOW / 1000);
     const header = `t=${ts},v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`;
@@ -63,7 +63,7 @@ describe("verifyWebhookSignature — rejections", () => {
       verifyWebhookSignature(payload, header, SECRET, { now: () => NOW });
       throw new Error("expected to throw");
     } catch (err) {
-      expect((err as CrossdeckError).code).toBe("webhook_invalid_signature");
+      expect((err as CrossdeckError).code).toBe("webhook_signature_mismatch");
     }
   });
 
@@ -89,25 +89,29 @@ describe("verifyWebhookSignature — rejections", () => {
     }
   });
 
-  it("timestamp older than replayToleranceMs (default 5 min) throws webhook_replay_window_exceeded", () => {
+  it("timestamp older than replayToleranceMs (default 5 min) throws webhook_timestamp_outside_tolerance", () => {
     const payload = '{"x":1}';
     const header = makeHeader(payload, SECRET, NOW - 10 * 60_000);
     try {
       verifyWebhookSignature(payload, header, SECRET, { now: () => NOW });
       throw new Error("expected to throw");
     } catch (err) {
-      expect((err as CrossdeckError).code).toBe("webhook_replay_window_exceeded");
+      expect((err as CrossdeckError).code).toBe("webhook_timestamp_outside_tolerance");
     }
   });
 
-  it("malformed header (no t= or no v1=) throws webhook_invalid_signature", () => {
+  it("malformed header (no t= or no v1=) throws webhook_timestamp_missing", () => {
+    // v1.4.0 — split from webhook_invalid_signature. A header
+    // missing the timestamp segment can't be replay-checked at
+    // all, so the failure mode is distinct from a signature
+    // mismatch (which presumes a parseable header + timestamp).
     for (const header of ["bogus", "t=123", "v1=abc"]) {
       try {
         verifyWebhookSignature('{"x":1}', header, SECRET, { now: () => NOW });
         throw new Error(`expected to throw for header: ${header}`);
       } catch (err) {
         expect(err).toBeInstanceOf(CrossdeckError);
-        expect((err as CrossdeckError).code).toBe("webhook_invalid_signature");
+        expect((err as CrossdeckError).code).toBe("webhook_timestamp_missing");
       }
     }
   });
@@ -119,18 +123,22 @@ describe("verifyWebhookSignature — rejections", () => {
       verifyWebhookSignature(payload, header, SECRET, { now: () => NOW });
       throw new Error("expected to throw");
     } catch (err) {
-      expect((err as CrossdeckError).code).toBe("webhook_replay_window_exceeded");
+      expect((err as CrossdeckError).code).toBe("webhook_timestamp_outside_tolerance");
     }
   });
 
-  it("valid signature but non-JSON payload throws webhook_invalid_signature", () => {
+  it("valid signature but non-JSON payload throws webhook_payload_not_json", () => {
+    // v1.4.0 — split from webhook_invalid_signature. The signature
+    // DID verify (HMAC matched), so the failure is downstream of
+    // the auth gate — distinct code so the customer can branch on
+    // "tampered post-signing" vs "wrong secret".
     const payload = "not json {";
     const header = makeHeader(payload, SECRET, NOW);
     try {
       verifyWebhookSignature(payload, header, SECRET, { now: () => NOW });
       throw new Error("expected to throw");
     } catch (err) {
-      expect((err as CrossdeckError).code).toBe("webhook_invalid_signature");
+      expect((err as CrossdeckError).code).toBe("webhook_payload_not_json");
     }
   });
 });
@@ -147,13 +155,19 @@ describe("verifyWebhookSignature — knobs", () => {
     ).not.toThrow();
   });
 
-  it("tolerance of 0 disables the replay window (caller opts out)", () => {
+  it("tolerance of 0 still enforces the replay window (v1.4.0 — cannot disable)", () => {
+    // v1.4.0 Phase 7.2 — pre-v1.4.0 tolerance=0 silently disabled
+    // replay protection (`if (tolerance > 0)` skipped the check).
+    // v1.4.0 contract: timestamp validation is MANDATORY; the
+    // only knob is window width, never off. tolerance=0 means
+    // "require exact-second match" — effectively unreachable, so
+    // any non-trivial drift throws.
     const payload = '{"x":1}';
     const ancient = NOW - 365 * 24 * 60 * 60_000;
     const header = makeHeader(payload, SECRET, ancient);
     expect(() =>
       verifyWebhookSignature(payload, header, SECRET, { now: () => NOW, replayToleranceMs: 0 }),
-    ).not.toThrow();
+    ).toThrowError(/webhook_timestamp_outside_tolerance|outside the 0ms/);
   });
 
   it("supports multiple secrets for rotation — any match wins", () => {
@@ -161,6 +175,61 @@ describe("verifyWebhookSignature — knobs", () => {
     const header = makeHeader(payload, SECRET, NOW);
     expect(() =>
       verifyWebhookSignature(payload, header, ["whsec_old_stale", SECRET], { now: () => NOW }),
+    ).not.toThrow();
+  });
+});
+
+describe("verifyWebhookSignature — v1.4.0 Phase 7.2 footgun hardening", () => {
+  function assertInvalidTolerance(value: unknown): void {
+    const payload = '{"x":1}';
+    const header = makeHeader(payload, SECRET, NOW);
+    try {
+      verifyWebhookSignature(payload, header, SECRET, {
+        now: () => NOW,
+        // Intentionally pass through any-typed test inputs that
+        // would normally be filtered by the TypeScript boundary —
+        // simulates JS callers + accidental misuse.
+        replayToleranceMs: value as number,
+      });
+      throw new Error(`expected to throw for tolerance: ${String(value)}`);
+    } catch (err) {
+      expect(err).toBeInstanceOf(CrossdeckError);
+      expect((err as CrossdeckError).code).toBe("webhook_invalid_tolerance");
+    }
+  }
+
+  it("rejects Infinity tolerance (would silently disable replay protection)", () => {
+    assertInvalidTolerance(Infinity);
+  });
+
+  it("rejects NaN tolerance", () => {
+    assertInvalidTolerance(NaN);
+  });
+
+  it("rejects negative tolerance", () => {
+    assertInvalidTolerance(-1);
+    assertInvalidTolerance(-60_000);
+  });
+
+  it("rejects tolerance above the 24h cap", () => {
+    const overCap = 24 * 60 * 60 * 1000 + 1;
+    assertInvalidTolerance(overCap);
+    assertInvalidTolerance(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("rejects non-number tolerance (null / string)", () => {
+    assertInvalidTolerance(null);
+    assertInvalidTolerance("5000");
+  });
+
+  it("accepts tolerance exactly at the 24h cap", () => {
+    const payload = '{"x":1}';
+    const header = makeHeader(payload, SECRET, NOW);
+    expect(() =>
+      verifyWebhookSignature(payload, header, SECRET, {
+        now: () => NOW,
+        replayToleranceMs: 24 * 60 * 60 * 1000,
+      }),
     ).not.toThrow();
   });
 });

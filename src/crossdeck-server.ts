@@ -56,6 +56,8 @@ import { collectRuntimeInfo, runtimeInfoToProperties, type RuntimeInfo } from ".
 import { FlushOnExit } from "./flush-on-exit";
 import { SuperPropertyStore, type GroupMembership } from "./super-properties";
 import { EntitlementCache, type EntitlementsListener } from "./entitlement-cache";
+import { scrubPiiFromProperties } from "./consent";
+import { deriveIdempotencyKeyForPurchase } from "./idempotency-key";
 import { ConsoleDebugLogger, NullDebugLogger, findSensitivePropertyKeys, type DebugLogger } from "./debug";
 import { mintId } from "./_rand";
 import type {
@@ -121,6 +123,10 @@ export class CrossdeckServer extends EventEmitter {
   private readonly baseUrl: string;
   private readonly appId: string | undefined;
   private readonly env: Environment;
+  /** PII scrubber toggle. Default true — parity with Web/RN/Swift.
+   * Pre-v1.4.0 the Node SDK shipped track() payloads UNREDACTED,
+   * a privacy contract drift versus the README. */
+  private readonly scrubPii: boolean;
   private readonly secretKeyPrefix: string;
 
   /**
@@ -186,6 +192,11 @@ export class CrossdeckServer extends EventEmitter {
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.env = inferEnvFromKey(options.secretKey);
     this.secretKeyPrefix = maskSecretKey(options.secretKey);
+    // PII scrubber on by default — parity with Web/RN/Swift.
+    // Explicit `false` opts out for regulator-required audit
+    // trails (see CrossdeckServerOptions.scrubPii docstring for
+    // blast-radius warning).
+    this.scrubPii = options.scrubPii !== false;
 
     this.http = new HttpClient({
       secretKey: options.secretKey,
@@ -231,7 +242,9 @@ export class CrossdeckServer extends EventEmitter {
     this.eventQueue = new EventQueue({
       http: this.http,
       batchSize: options.eventFlushBatchSize ?? 20,
-      intervalMs: options.eventFlushIntervalMs ?? 1500,
+      // v1.4.0 Phase 3.3 — flush interval default parity at 2000ms
+      // across every SDK. Per-instance override stays.
+      intervalMs: options.eventFlushIntervalMs ?? 2000,
       envelope: (): BatchEnvelope => ({
         appId: this.appId,
         // Ship env on every batch so the backend can cross-check
@@ -741,7 +754,15 @@ export class CrossdeckServer extends EventEmitter {
       });
     }
 
-    const sanitized = sanitizePropertyBag(event.properties, "event properties") ?? {};
+    const validated = sanitizePropertyBag(event.properties, "event properties") ?? {};
+    // v1.4.0 Phase 3.1 — apply the PII scrubber. Pre-v1.4.0 the
+    // Node SDK was the ONLY one that skipped this, despite the
+    // README promising parity with Web/RN/Swift. The scrubber
+    // walks nested maps + arrays and rewrites email- and card-
+    // number-shaped substrings to `<email>` / `<card>` sentinels.
+    const sanitized = this.scrubPii
+      ? (scrubPiiFromProperties(validated) as EventProperties)
+      : validated;
 
     if (this.debug.enabled) {
       const flagged = findSensitivePropertyKeys(sanitized);
@@ -822,6 +843,12 @@ export class CrossdeckServer extends EventEmitter {
     const body: Record<string, unknown> = {
       events: normalized,
       sdk: { name: SDK_NAME, version: this.sdkVersion },
+      // Match the queue's batch envelope (see event-queue.ts) — backend
+      // cross-checks `environment` against the API-key-derived env and
+      // rejects mismatches loudly (env_mismatch). Pre-fix this direct
+      // ingest path skipped env, so a "live key, env: sandbox"
+      // misconfig fell through silently for the bulk-import path.
+      environment: this.env,
     };
     if (this.appId) body.appId = this.appId;
 
@@ -902,11 +929,37 @@ export class CrossdeckServer extends EventEmitter {
     // order so the default sits last fixes both the explicit-undefined
     // case AND the omitted-key case in one line.
     const rail = input.rail ?? "apple";
-    return this.http.request<PurchaseResult>("POST", "/purchases/sync", {
-      body: { ...input, rail },
+    const body = { ...input, rail };
+    // Phase 2.2 bank-grade contract: deterministic Idempotency-Key
+    // from the body. Same input → same key → backend short-circuits
+    // with idempotent_replay: true on retry. Caller can override
+    // via options.idempotencyKey for advanced use cases (custom
+    // idempotency window inside a job runner, etc).
+    const idempotencyKey =
+      options?.idempotencyKey ?? deriveIdempotencyKeyForPurchase(body);
+    const result = await this.http.request<PurchaseResult>("POST", "/purchases/sync", {
+      body,
+      idempotencyKey,
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
     });
+    // Phase 3.5 (v1.4.0) — emit purchase.completed so server-side
+    // syncPurchases callers show up on the same funnel as the
+    // Swift/Android auto-track path. Schema mirrors the native
+    // auto-track shape on event name + rail/productId.
+    try {
+      const sourceProductId = result.entitlements[0]?.source.productId;
+      const sourceSubscriptionId = result.entitlements[0]?.source.subscriptionId;
+      const props: Record<string, unknown> = { rail };
+      if (sourceProductId) props.productId = sourceProductId;
+      if (sourceSubscriptionId) props.subscriptionId = sourceSubscriptionId;
+      if (result.idempotent_replay) props.idempotent_replay = true;
+      this.track({ name: "purchase.completed", properties: props });
+    } catch {
+      // track() validates name; we control the literal, so this
+      // catch is defensive against future validation drift.
+    }
+    return result;
   }
 
   // ============================================================
@@ -1236,12 +1289,59 @@ export class CrossdeckServer extends EventEmitter {
   }
 
   /**
-   * Tear down handlers and clear in-memory state. Tests + custom
-   * lifecycle callers only. Production code should rely on
-   * `flush-on-exit` instead.
+   * Tear down handlers and clear in-memory state.
+   *
+   * **v1.4.0 bank-grade contract:** `shutdown()` AWAITS `flush()`
+   * before dropping the queue, so callers don't silently lose
+   * every queued event on a clean shutdown. The pre-v1.4.0
+   * behaviour (sync `eventQueue.reset()` with no flush) was the
+   * default for both `shutdown()` and `[Symbol.dispose]`; only
+   * `await using` + `[Symbol.asyncDispose]` flushed correctly.
+   *
+   * Production servers should still prefer `await server.flush()`
+   * (visible) followed by `server.shutdown()` so the flush
+   * outcome is observable — `shutdown()`'s internal flush swallows
+   * errors as a best-effort drain.
+   *
+   * Use [[shutdownSync]] only when the runtime cannot await
+   * (e.g. inside `Symbol.dispose` — see below).
    */
-  shutdown(reason: "shutdown" | "dispose" | "asyncDispose" = "shutdown"): void {
+  async shutdown(
+    reason: "shutdown" | "dispose" | "asyncDispose" = "shutdown",
+  ): Promise<void> {
     this.emit("sdk.shutdown", { reason });
+    try {
+      await this.flush();
+    } catch {
+      // Best-effort drain — a failed flush during shutdown still
+      // proceeds to teardown so the process can exit. The flush's
+      // own observability (events.batch_failed) already surfaced
+      // the error to whatever consumer cared.
+    }
+    this.shutdownSync(reason);
+  }
+
+  /**
+   * Synchronous teardown — drops the in-memory queue WITHOUT
+   * flushing, then clears all in-memory state. Used by
+   * `[Symbol.dispose]` (which has no await) and tests that need
+   * an unconditional sync wipe. Production code should use
+   * [[shutdown]] (async) instead so queued events are flushed.
+   *
+   * A queue with items at sync-shutdown logs a warning recommending
+   * `[Symbol.asyncDispose]` or `await server.shutdown()` — silent
+   * loss is incompatible with the bank-grade contract.
+   */
+  shutdownSync(reason: "shutdown" | "dispose" | "asyncDispose" = "shutdown"): void {
+    const queuedCount = this.eventQueue.getStats().buffered;
+    if (queuedCount > 0 && reason !== "asyncDispose") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[crossdeck] shutdownSync() dropped ${queuedCount} queued event(s) without flushing. ` +
+          `Use \`await server.shutdown()\` or \`await using server = ...\` ` +
+          `with \`[Symbol.asyncDispose]\` to drain the buffer before teardown.`,
+      );
+    }
     this.errorTracker?.uninstall();
     this.flushOnExit?.uninstall();
     this.eventQueue.reset();
@@ -1409,30 +1509,29 @@ export class CrossdeckServer extends EventEmitter {
    *   // ... use server ...
    *   // at end of block, server[Symbol.dispose]() runs automatically
    *
-   * `Symbol.dispose` is synchronous so we can't await `flush()` here
-   * — for that, use `await using` + `[Symbol.asyncDispose]()`. This
-   * sync variant just calls `shutdown()` (handler cleanup +
-   * in-memory state wipe).
+   * **`Symbol.dispose` is synchronous so it CANNOT await the queue
+   * flush.** A queue with pending events at sync-dispose time will
+   * be DROPPED — `shutdownSync` warns to the console when this
+   * happens. For the common case of "drain the queue before
+   * exit", switch to `await using` + `[Symbol.asyncDispose]` (or
+   * call `await server.shutdown()` explicitly before the variable
+   * goes out of scope).
    */
   [Symbol.dispose](): void {
-    this.shutdown("dispose");
+    this.shutdownSync("dispose");
   }
 
   /**
    * Async disposal hook — runs when an `await using` declaration
-   * exits scope. Awaits `flush()` THEN runs `shutdown()`. Use this
-   * variant when the caller needs the queue drained before exit
-   * (the common case for serverless handlers).
+   * exits scope. Awaits the bank-grade `shutdown()` which flushes
+   * the queue THEN tears down. Use this variant for any code path
+   * that owns queued events at exit (serverless handlers,
+   * background workers, end-of-request hooks).
    *
    *   await using server = new CrossdeckServer({ ... });
    */
   async [Symbol.asyncDispose](): Promise<void> {
-    try {
-      await this.flush();
-    } catch {
-      // shutdown is best-effort
-    }
-    this.shutdown("asyncDispose");
+    await this.shutdown("asyncDispose");
   }
 
   // ============================================================

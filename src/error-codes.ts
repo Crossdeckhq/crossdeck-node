@@ -169,18 +169,43 @@ const _CROSSDECK_ERROR_CODES = Object.freeze([
   },
 
   // ----- Webhook verification (Node-specific) -----
+  // v1.4.0 Phase 7.2 — distinguishable codes. Pre-v1.4.0 the
+  // helper used webhook_invalid_signature for nearly every failure
+  // mode so a customer couldn't separate replay-attack signals
+  // from wrong-secret signals in alerting.
   {
-    code: "webhook_invalid_signature",
+    code: "webhook_signature_mismatch",
     type: "authentication_error",
-    description: "The webhook signature header did not verify against the supplied secret.",
-    resolution: "Confirm the secret matches the one in your Crossdeck dashboard → Webhooks page. If the request is genuinely from Crossdeck, the secret is wrong, stale, or recently rotated.",
+    description: "Webhook HMAC didn't verify against any configured secret (wrong-secret / stale rotation signal).",
+    resolution: "Confirm the secret matches dashboard → Webhooks. If you rotated, include both the old and new secret as an array until receivers cut over.",
     retryable: false,
   },
   {
-    code: "webhook_replay_window_exceeded",
+    code: "webhook_timestamp_outside_tolerance",
     type: "authentication_error",
-    description: "The webhook timestamp is older than the replay-tolerance window (default 5 minutes).",
-    resolution: "The webhook is either replayed or your receiving clock is wildly skewed. Verify NTP on the receiving host. Increase replayToleranceMs only if you accept the replay-attack risk.",
+    description: "Webhook timestamp drift exceeds the configured replay-tolerance window (default 5 minutes; replay-attack signal).",
+    resolution: "Verify NTP on the receiving host. A spike on this code warrants its own alert separate from signature_mismatch — replay attacks look like this.",
+    retryable: false,
+  },
+  {
+    code: "webhook_timestamp_missing",
+    type: "authentication_error",
+    description: "Webhook signature header is absent or has no `t=` timestamp segment — the timestamp gate cannot be verified.",
+    resolution: "Confirm the request actually came from Crossdeck (signature headers are always present on real deliveries). A missing header is either a misconfigured intermediary or a forged request.",
+    retryable: false,
+  },
+  {
+    code: "webhook_payload_not_json",
+    type: "authentication_error",
+    description: "Webhook signature verified but the body isn't valid JSON — payload tampered post-signing or source bug.",
+    resolution: "Inspect the raw payload. If it's not JSON, either the request was modified in transit or the sender has a bug — file a support ticket with the raw body.",
+    retryable: false,
+  },
+  {
+    code: "webhook_invalid_tolerance",
+    type: "configuration_error",
+    description: "verifyWebhookSignature() called with a non-finite / negative / above-24h-cap replayToleranceMs (would silently disable replay protection).",
+    resolution: "Pass a finite number between 0 and 86_400_000ms (24h). Default (5 minutes) is correct for almost every scenario. Pre-v1.4.0 accepted Infinity/NaN and silently dropped the check.",
     retryable: false,
   },
   {
@@ -188,6 +213,102 @@ const _CROSSDECK_ERROR_CODES = Object.freeze([
     type: "configuration_error",
     description: "verifyWebhookSignature() was called without a signing secret.",
     resolution: "Pass the secret from your Crossdeck dashboard → Webhooks page. Never hardcode in source — read from an env var.",
+    retryable: false,
+  },
+  {
+    code: "webhook_invalid_signature",
+    type: "authentication_error",
+    description: "DEPRECATED in v1.4.0 — split into webhook_signature_mismatch / webhook_timestamp_missing / webhook_timestamp_outside_tolerance / webhook_payload_not_json for alerting clarity.",
+    resolution: "Migrate alert rules to the more specific v1.4.0 codes — they distinguish replay-attack signals from wrong-secret signals.",
+    retryable: false,
+  },
+  {
+    code: "webhook_replay_window_exceeded",
+    type: "authentication_error",
+    description: "DEPRECATED in v1.4.0 — renamed to webhook_timestamp_outside_tolerance.",
+    resolution: "Update alerts to webhook_timestamp_outside_tolerance.",
+    retryable: false,
+  },
+
+  // ----- Backend-emitted codes (v1.4.0 Phase 6.2 backfill) -----
+  // Mirror of backend/src/api/v1-errors.ts ApiErrorCode. Same set
+  // as the Web SDK ships — keep these synchronised so a developer
+  // hitting any code via either SDK gets the same remediation.
+  {
+    code: "missing_api_key",
+    type: "authentication_error",
+    description: "No Authorization header (or Crossdeck-Api-Key header) on the request.",
+    resolution: "Confirm the CrossdeckServer was constructed with a cd_sk_… secretKey. Re-check env vars in production deployments.",
+    retryable: false,
+  },
+  {
+    code: "invalid_api_key",
+    type: "authentication_error",
+    description: "The secret key is malformed, unknown, or doesn't resolve to a project.",
+    resolution: "Copy the key from Crossdeck dashboard → API keys. Server SDK requires cd_sk_test_ / cd_sk_live_ — client SDK keys (cd_pub_…) won't work on the Node SDK.",
+    retryable: false,
+  },
+  {
+    code: "key_revoked",
+    type: "authentication_error",
+    description: "The secret key was revoked in the dashboard.",
+    resolution: "Mint a fresh key in dashboard → API keys → Create new. The revoked key cannot be reactivated.",
+    retryable: false,
+  },
+  {
+    code: "env_mismatch",
+    type: "permission_error",
+    description: "The key's env prefix doesn't match the resolved app's configured env.",
+    resolution: "Use a cd_sk_live_ key with a production app, cd_sk_test_ with a sandbox app. Crossing breaks the env lock.",
+    retryable: false,
+  },
+  {
+    code: "idempotency_key_in_use",
+    type: "invalid_request_error",
+    description: "An Idempotency-Key was reused for a request with a different body (Stripe-grade contract).",
+    resolution: "Server SDK derives keys deterministically from the body since v1.4.0; this should only fire if you passed options.idempotencyKey explicitly. Use a fresh key per logical operation.",
+    retryable: false,
+  },
+  {
+    code: "rate_limited",
+    type: "rate_limit_error",
+    description: "Request rate exceeded the project's per-second cap.",
+    resolution: "Honour Retry-After (managed retries do this automatically). For custom paths, throttle to <100 req/s/key.",
+    retryable: true,
+  },
+  {
+    code: "internal_error",
+    type: "internal_error",
+    description: "Server-side issue. Safe to retry with backoff.",
+    resolution: "Managed retries handle this automatically. If a code path surfaces it to your code, contact support with the requestId.",
+    retryable: true,
+  },
+  {
+    code: "google_not_supported",
+    type: "invalid_request_error",
+    description: "POST /purchases/sync with rail=google is gated until the Play Developer API reconciliation worker ships.",
+    resolution: "Until v1.5+, Google Play purchases verify via Real-time Developer Notifications. The Android SDK auto-track path handles this transparently.",
+    retryable: false,
+  },
+  {
+    code: "stripe_not_supported",
+    type: "invalid_request_error",
+    description: "POST /purchases/sync with rail=stripe is unsupported — Stripe webhooks deliver evidence server-side.",
+    resolution: "Wire Stripe via the standard Checkout / Customer Portal flow; Crossdeck reconciles via the platform webhook automatically.",
+    retryable: false,
+  },
+  {
+    code: "missing_required_param",
+    type: "invalid_request_error",
+    description: "A required field is absent from the request body.",
+    resolution: "The error.message identifies the missing field. Refer to the SDK's TypeScript types for canonical shapes.",
+    retryable: false,
+  },
+  {
+    code: "invalid_param_value",
+    type: "invalid_request_error",
+    description: "A field is present but the value failed validation.",
+    resolution: "Read error.message for the field + reason. SDK-managed call sites should never emit this — file a bug if you do.",
     retryable: false,
   },
 ] as const);

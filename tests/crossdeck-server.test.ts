@@ -55,7 +55,7 @@ describe("CrossdeckServer", () => {
    * Server with the error tracker constructed but ALL its global hooks
    * disabled — `captureError` + `captureMessage` work via direct method
    * calls without needing `process.on(...)` listeners. Tests using this
-   * helper should always call `s.shutdown()` in a `finally` block for
+   * helper should always call `s.shutdownSync()` in a `finally` block for
    * defence in depth.
    */
   function serverWithCapture(): CrossdeckServer {
@@ -490,7 +490,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -515,7 +515,7 @@ describe("CrossdeckServer", () => {
       s.captureError("a string thrown by accident");
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -537,7 +537,7 @@ describe("CrossdeckServer", () => {
       });
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -556,7 +556,7 @@ describe("CrossdeckServer", () => {
       s.captureMessage("deprecated path hit", "warning");
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -592,7 +592,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -612,7 +612,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -631,7 +631,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -654,7 +654,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -678,7 +678,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -703,7 +703,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("second"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -732,7 +732,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -754,7 +754,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("auth-token-12345"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -776,7 +776,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("original"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
@@ -1017,7 +1017,7 @@ describe("CrossdeckServer", () => {
     try {
       expect(s.diagnostics().errors.handlersInstalled).toBe(true);
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
   });
 
@@ -1677,7 +1677,7 @@ describe("CrossdeckServer", () => {
       s.captureError(new Error("boom"));
       await s.flush();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
     expect(events).toHaveLength(1);
     expect(events[0]!.kind).toBe("error.handled");
@@ -1689,7 +1689,7 @@ describe("CrossdeckServer", () => {
     s.on("sdk.shutdown", (info) => {
       reason = info.reason;
     });
-    s.shutdown();
+    s.shutdownSync();
     expect(reason).toBe("shutdown");
   });
 
@@ -1713,7 +1713,7 @@ describe("CrossdeckServer", () => {
     try {
       expect(s.getHealth().errorHandlersInstalled).toBe(true);
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
   });
 
@@ -1854,7 +1854,7 @@ describe("CrossdeckServer", () => {
       await s.flush();
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
   });
 
@@ -1880,7 +1880,7 @@ describe("CrossdeckServer", () => {
       expect(reqs).toEqual([1]);
       expect(ress).toEqual([200]);
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
   });
 
@@ -1916,7 +1916,7 @@ describe("CrossdeckServer", () => {
       setTimeout(() => ctrl.abort(), 20);
       await expect(flight).rejects.toMatchObject({ code: "request_aborted" });
     } finally {
-      s.shutdown();
+      s.shutdownSync();
     }
   });
 
@@ -1938,7 +1938,7 @@ describe("CrossdeckServer", () => {
     expect(s.getGroups()).toEqual({ org: { id: "acme_inc" } });
     expect(s.diagnostics().entitlements.count).toBe(1);
 
-    s.shutdown();
+    s.shutdownSync();
     expect(s.getSuperProperties()).toEqual({});
     expect(s.getGroups()).toEqual({});
     expect(s.diagnostics().entitlements.count).toBe(0);

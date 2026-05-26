@@ -643,21 +643,26 @@ describe("EventQueue — permanent failure on 4xx (P0 #6)", () => {
 
   it("RETAINS the batch on a network error (no status — retryable)", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
-    const sched = captureScheduler();
     const onPermanentFailure = vi.fn();
+    // batchSize=2 so a single enqueue does NOT auto-fire flush. The
+    // captured scheduler sees BOTH idle-flush + retry calls, so we
+    // can't compare callCount cleanly — assert via `nextRetryAt`
+    // (canonical "retry scheduled" signal, set ONLY by the retry
+    // path) instead. Same pattern as the 401 permanent-failure test
+    // above.
     const q = new EventQueue({
       http: makeHttp(),
-      batchSize: 1,
+      batchSize: 2,
       intervalMs: 10_000,
       envelope,
-      scheduler: sched.scheduler,
+      scheduler: () => () => {},
       onPermanentFailure,
     });
     q.enqueue(makeEvent("a"));
     await q.flush();
-    // Conservative default: only flag permanent on clear 4xx evidence.
     expect(onPermanentFailure).not.toHaveBeenCalled();
-    expect(sched.callCount).toBe(1);
+    expect(q.getStats().nextRetryAt).not.toBeNull();
+    expect(q.getStats().consecutiveFailures).toBe(1);
     expect(q.getStats().inFlight).toBe(1);
   });
 });
