@@ -47,7 +47,7 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const s = newServer();
-    s.track("test.event", { foo: "bar" });
+    s.track({ name: "test.event", properties: { foo: "bar" } });
 
     // Pre-flush: queue should have the event buffered.
     expect(s.diagnostics().events.buffered).toBeGreaterThan(0);
@@ -57,7 +57,7 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
     // shutdown() MUST have flushed — fetch was called with the event.
     expect(fetchSpy).toHaveBeenCalled();
     expect(sent.length).toBeGreaterThan(0);
-    expect(sent[0].length).toBeGreaterThan(0);
+    expect(sent[0]!.length).toBeGreaterThan(0);
   });
 
   it("async shutdown() proceeds with teardown even if flush fails", async () => {
@@ -66,7 +66,7 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
       .mockRejectedValue(new Error("simulated network failure")) as unknown as typeof fetch;
 
     const s = newServer();
-    s.track("test.event", { foo: "bar" });
+    s.track({ name: "test.event", properties: { foo: "bar" } });
 
     // The async shutdown() MUST NOT throw — best-effort drain
     // followed by sync teardown.
@@ -78,8 +78,8 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
     globalThis.fetch = vi.fn() as unknown as typeof fetch;
 
     const s = newServer();
-    s.track("test.event_a", { foo: "bar" });
-    s.track("test.event_b", { foo: "baz" });
+    s.track({ name: "test.event_a", properties: { foo: "bar" } });
+    s.track({ name: "test.event_b", properties: { foo: "baz" } });
 
     s.shutdownSync();
 
@@ -108,11 +108,11 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
     }) as unknown as typeof fetch;
 
     const s = newServer();
-    s.track("disposed.event", { x: 1 });
+    s.track({ name: "disposed.event", properties: { x: 1 } });
 
     await s[Symbol.asyncDispose]();
 
     expect(sent.length).toBeGreaterThan(0);
-    expect(sent[0].length).toBeGreaterThan(0);
+    expect(sent[0]!.length).toBeGreaterThan(0);
   });
 });

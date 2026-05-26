@@ -4,6 +4,18 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] — 2026-05-26
+
+Patch — fix `tests/shutdown-flush.test.ts` compile error under
+strict tsc. The five `s.track("name", { props })` calls used the
+web/RN positional-args shape; Node SDK's track takes a single
+`ServerEvent` object. Switched to `s.track({ name, properties })`.
+Plus a non-null assertion on `sent[0].length` for
+`noUncheckedIndexedAccess`. v1.4.1 was tagged on the public
+crossdeck-node repo but its publish workflow aborted on these
+errors. v1.4.2 is the first 1.4.x line to land on the npm
+registry. **No SDK code changes vs v1.4.0 / v1.4.1**.
+
 ## [1.4.1] — 2026-05-26
 
 Patch — add automated npm publish workflow to the public
