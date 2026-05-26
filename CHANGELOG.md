@@ -4,6 +4,22 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] — 2026-05-26
+
+Patch — add automated npm publish workflow to the public
+`crossdeck-node` repo so future `vX.Y.Z` tag pushes auto-publish
+to npm via OIDC Trusted Publishing (matches the existing
+`crossdeck-web` pattern). Also strips `test:e2e` from
+`prepublishOnly` — the publish workflow runs lint + unit tests +
+build which covers the release gate. No SDK code changes vs
+v1.4.0.
+
+**Operator note:** npmjs.com Trusted Publisher rule must be
+configured for `crossdeck-node` (owner: VistaApps-za,
+workflow: publish.yml) before the OIDC publish succeeds. First
+publish after this lands will fail with an auth error if the
+rule is missing — that's the prompt to configure it.
+
 ## [1.4.0] — 2026-05-26
 
 **Bank-grade reconciliation release.** 6-pillar KPMG-style audit closed across SDK + backend. Every behavioural guarantee registered in the monorepo's `contracts/` directory with a CI-enforced audit job.
