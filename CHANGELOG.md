@@ -4,6 +4,59 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] — 2026-05-27
+
+`crossdeck.contract_failed` is now single-fire to a dedicated
+reliability endpoint instead of the customer's `track()` pipeline.
+Independent-controller flow per Privacy Policy §6; schema-locked by
+`contracts/diagnostics/contract-failed-payload-schema-lock.json`.
+`ContractFailureInput.extra` removed (schema-lock forbids unbounded
+fields); `ContractFailureInput.deviceClass` added.
+
+## [1.5.0] — 2026-05-26
+
+Minor — `CrossdeckContracts` + `reportContractFailure(...)` ship as a
+new public surface on every SDK simultaneously. Additive only; no
+behavioural change to existing APIs.
+
+**Added:**
+
+- **`CrossdeckContracts` namespace** — typed access to the bank-grade
+  contract registry. Methods: `all()`, `allIncludingHistorical()`,
+  `byId(id)`, `byPillar(pillar)`, `withStatus(status)`,
+  `findByTestName(name)`. Properties: `sdkVersion`, `bundledIn`
+  (e.g. `"@cross-deck/node@1.5.0"`).
+- **`Contract` type + `ContractPillar` / `ContractStatus` /
+  `ContractAppliesTo` unions + `ContractTestRef` + `ContractFailureInput`
+  interfaces** exported from the top-level entry. Treated as
+  binary-stable.
+- **`CrossdeckServer.reportContractFailure(input)` method** — fires a
+  typed `crossdeck.contract_failed` server event through the standard
+  `track()` pipeline. Wire properties: `contract_id`, `sdk_version`
+  (auto-stamped), `sdk_platform` (auto-stamped to `"node"`),
+  `failure_reason`, `run_context` (`ci` | `dogfood` | `customer-app`),
+  `run_id`, plus optional `test_file` / `test_name` from `input.testRef`.
+
+**Fixed:**
+
+- `shutdownSync()` now emits the `sdk.shutdown` EventEmitter signal
+  with the correct reason — previously only the async `shutdown()`
+  path emitted, leaving consumers of `Symbol.dispose` /
+  `shutdownSync()` direct-callers blind. Async path is unchanged
+  thanks to a private dedup gate so listeners still fire exactly
+  once per teardown.
+- Test infrastructure: shutdown-flush + track-PII-scrub tests were
+  reading `body.data` from captured fetch payloads but the wire
+  shape uses `body.events` (matching backend + Web/RN SDKs). Tests
+  fixed to read the correct field; behaviour was already correct.
+
+**Changed:**
+
+- Contract registry source files migrated to camelCase keys
+  (`appliesTo`, `codeRef`, `testRef`, `registeredAt`,
+  `firstRegisteredIn`). The bundled `contracts.json` sidecar uses
+  the new keys; `bundledIn` is build-stamped, never in source.
+
 ## [1.4.2] — 2026-05-26
 
 Patch — fix `tests/shutdown-flush.test.ts` compile error under

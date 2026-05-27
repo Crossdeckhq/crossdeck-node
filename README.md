@@ -569,6 +569,64 @@ const failed = results.filter((r) => !r.ok);
 
 Symmetric `bulkRevokeEntitlement(revokes[], options?)`.
 
+## Bank-grade contracts
+
+The SDK ships its own contracts registry — every behavioural guarantee the SDK makes (per-user cache isolation, deterministic Idempotency-Key, queue durability, etc.) lives in `contracts/**/*.json` at the monorepo root and is **bundled into every release**. The customer's lockfile pins SDK code + contracts atomically — drift between what the SDK does and what it claims is structurally impossible. See [`contracts/README.md`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md) for the full architecture.
+
+### `CrossdeckContracts` — typed access to the bundled registry
+
+```ts
+import { CrossdeckContracts } from "@cross-deck/node";
+
+CrossdeckContracts.all();                              // enforced contracts only
+CrossdeckContracts.allIncludingHistorical();           // + proposed + retired
+CrossdeckContracts.byId("idempotency-key-deterministic");
+CrossdeckContracts.byPillar("revenue");
+CrossdeckContracts.withStatus("proposed");
+CrossdeckContracts.findByTestName("rail namespacing prevents cross-rail collisions");
+CrossdeckContracts.sdkVersion;        // "1.5.0"
+CrossdeckContracts.bundledIn;         // "@cross-deck/node@1.5.0"
+```
+
+The `Contract` type is exported alongside; the binary-stability promise is documented in [`contracts/README.md`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md).
+
+### `crossdeckServer.reportContractFailure(input)` — surface contract test failures
+
+When a contract test asserts and fails — in your CI, a dogfood run, or a customer integration test — fire a typed `crossdeck.contract_failed` event over the **Crossdeck reliability channel**. This is one-way operational telemetry to the Crossdeck operations team (Privacy Policy §6, "Flow B"); it never enters your `track()` pipeline, never shows in your dashboard, never bills against your event quota. The wire shape is schema-locked at [`contracts/diagnostics/contract-failed-payload-schema-lock.json`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/diagnostics/contract-failed-payload-schema-lock.json):
+
+```ts
+import { CrossdeckServer } from "@cross-deck/node";
+
+const cd = new CrossdeckServer({ secretKey: process.env.CROSSDECK_SECRET_KEY! });
+
+cd.reportContractFailure({
+  contractId: "idempotency-key-deterministic",
+  failureReason: "expected cross-SDK oracle to match canonical vector, got drift",
+  runContext: process.env.CI ? "ci" : "dogfood",
+  runId: process.env.GITHUB_RUN_ID ?? crypto.randomUUID(),
+  testRef: {
+    file: "tests/idempotency-key.test.ts",
+    name: "apple JWS produces the canonical pinned UUID across all 5 SDKs",
+  },
+});
+```
+
+No new endpoint, no special ingest path — the event lands in the same pipeline every other server-side `track()` call does. It surfaces immediately in the dashboard's live event feed, the breakdown chart (group by `contract_id`, `sdk_platform`), and any alert rule with `event = crossdeck.contract_failed`.
+
+Properties stamped on the wire:
+
+| Property | Source |
+|----------|--------|
+| `contract_id` | caller |
+| `sdk_version`, `sdk_platform` | auto-stamped (`@cross-deck/node` ships `sdk_platform: "node"`) |
+| `failure_reason`, `run_context`, `run_id` | caller |
+| `test_file`, `test_name` | set when `testRef` is provided |
+| `device_class` | optional, set by caller (categorical bucket — e.g. `"linux-server"`, `"container"`, `"lambda"`) |
+
+The wire shape is schema-locked at [`contracts/diagnostics/contract-failed-payload-schema-lock.json`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/diagnostics/contract-failed-payload-schema-lock.json); per-SDK assertion tests gate it on every release. Free-form `extra` keys are not accepted — adding a field requires an amendment to the schema-lock contract first.
+
+For per-test-framework hooks see [`contracts/README.md` § Reporting contract failures](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md#reporting-contract-failures-back-to-crossdeck).
+
 ## Node version
 
 Node 18+. Uses the platform `fetch` and `node:crypto` — zero runtime dependencies.

@@ -41,7 +41,7 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
     const sent: unknown[][] = [];
     const fetchSpy = vi.fn().mockImplementation((_url, init: RequestInit) => {
       const body = init.body ? JSON.parse(init.body as string) : null;
-      sent.push(body?.data ?? []);
+      sent.push(body?.events ?? []);
       return Promise.resolve(jsonResponse({ object: "list", received: 1, env: "production" }, 202));
     });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
@@ -103,7 +103,7 @@ describe("CrossdeckServer shutdown — bank-grade flush contract", () => {
     const sent: unknown[][] = [];
     globalThis.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {
       const body = init.body ? JSON.parse(init.body as string) : null;
-      sent.push(body?.data ?? []);
+      sent.push(body?.events ?? []);
       return Promise.resolve(jsonResponse({ object: "list", received: 1, env: "production" }, 202));
     }) as unknown as typeof fetch;
 

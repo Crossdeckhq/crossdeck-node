@@ -44,7 +44,7 @@ describe("Node track() — PII scrubber (Phase 3.1)", () => {
     const calls: unknown[][] = [];
     const fetchSpy = vi.fn().mockImplementation((_url, init: RequestInit) => {
       const body = init.body ? JSON.parse(init.body as string) : null;
-      calls.push(body?.data ?? []);
+      calls.push(body?.events ?? []);
       return Promise.resolve(jsonResponse({ object: "list", received: 1, env: "production" }, 202));
     });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;

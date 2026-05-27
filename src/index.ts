@@ -48,6 +48,15 @@ export {
 export { CROSSDECK_ERROR_CODES, getErrorCode, isCrossdeckErrorCode } from "./error-codes";
 export { verifyWebhookSignature, signWebhookPayload } from "./webhooks";
 export { scrubPii, scrubPiiFromProperties } from "./consent";
+export { CrossdeckContracts } from "./contracts";
+export type {
+  Contract,
+  ContractPillar,
+  ContractStatus,
+  ContractAppliesTo,
+  ContractTestRef,
+  ContractFailureInput,
+} from "./contracts";
 
 export type {
   AliasIdentityInput,

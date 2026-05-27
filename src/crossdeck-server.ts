@@ -36,6 +36,8 @@ import { EventEmitter } from "node:events";
 
 import { CrossdeckError } from "./errors";
 import { validateEventProperties } from "./event-validation";
+import type { ContractFailureInput } from "./contracts";
+import { sendDiagnosticTelemetry } from "./_diagnostic-telemetry";
 import {
   DEFAULT_BASE_URL,
   DEFAULT_TIMEOUT_MS,
@@ -176,6 +178,16 @@ export class CrossdeckServer extends EventEmitter {
   private errorContext: Record<string, unknown> = {};
   private errorTags: Record<string, string> = {};
   private errorBeforeSend: ((err: CapturedError) => CapturedError | null) | null = null;
+
+  /**
+   * Dedup gate for `sdk.shutdown`. Both `shutdown()` (async) and
+   * `shutdownSync()` need to emit so direct callers of EITHER see
+   * the event (the async path's listener guarantees pre-launch
+   * tests, the sync path covers `Symbol.dispose` + tests that call
+   * `shutdownSync()` directly). Without this flag, `shutdown()`'s
+   * tail call into `shutdownSync()` would emit twice.
+   */
+  private didEmitShutdown = false;
 
   constructor(options: CrossdeckServerOptions) {
     super();
@@ -745,6 +757,35 @@ export class CrossdeckServer extends EventEmitter {
    *     `uncaughtException` has no per-request context; without the
    *     auto-fill, the event would be rejected at queue enqueue.
    */
+  /**
+   * Emit `crossdeck.contract_failed` to the Crossdeck reliability
+   * endpoint — single-fire, one-way, never visible in the customer's
+   * dashboard. Goes over a dedicated HTTP path with the reliability
+   * publishable key embedded at build time; the customer's track()
+   * pipeline never carries `crossdeck.*` events. This is the
+   * independent-controller flow described in Privacy Policy §6
+   * ("Flow B"). The wire shape is fixed by the schema-lock contract
+   * at `contracts/diagnostics/contract-failed-payload-schema-lock.json`.
+   */
+  reportContractFailure(input: ContractFailureInput): void {
+    const payload: Record<string, string> = {
+      contract_id: input.contractId,
+      sdk_version: SDK_VERSION,
+      sdk_platform: "node",
+      failure_reason: input.failureReason,
+      run_context: input.runContext,
+      run_id: input.runId,
+    };
+    if (input.testRef) {
+      payload.test_file = input.testRef.file;
+      payload.test_name = input.testRef.name;
+    }
+    if (input.deviceClass) {
+      payload.device_class = input.deviceClass;
+    }
+    sendDiagnosticTelemetry(payload);
+  }
+
   track(event: ServerEvent): void {
     if (!event.name) {
       throw new CrossdeckError({
@@ -1309,7 +1350,10 @@ export class CrossdeckServer extends EventEmitter {
   async shutdown(
     reason: "shutdown" | "dispose" | "asyncDispose" = "shutdown",
   ): Promise<void> {
-    this.emit("sdk.shutdown", { reason });
+    if (!this.didEmitShutdown) {
+      this.emit("sdk.shutdown", { reason });
+      this.didEmitShutdown = true;
+    }
     try {
       await this.flush();
     } catch {
@@ -1333,6 +1377,10 @@ export class CrossdeckServer extends EventEmitter {
    * loss is incompatible with the bank-grade contract.
    */
   shutdownSync(reason: "shutdown" | "dispose" | "asyncDispose" = "shutdown"): void {
+    if (!this.didEmitShutdown) {
+      this.emit("sdk.shutdown", { reason });
+      this.didEmitShutdown = true;
+    }
     const queuedCount = this.eventQueue.getStats().buffered;
     if (queuedCount > 0 && reason !== "asyncDispose") {
       // eslint-disable-next-line no-console

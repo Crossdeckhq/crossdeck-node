@@ -1,6 +1,6 @@
 {
   "name": "@cross-deck/node",
-  "version": "1.4.2",
+  "version": "1.5.1",
   "description": "Crossdeck server SDK for Node.js — verified subscriptions, entitlements, server-side error capture, and product telemetry in one client.",
   "license": "MIT",
   "homepage": "https://cross-deck.com",
@@ -22,6 +22,7 @@
       "import": "./dist/auto-events/index.mjs",
       "require": "./dist/auto-events/index.cjs"
     },
+    "./contracts.json": "./dist/contracts.json",
     "./package.json": "./package.json"
   },
   "files": [
@@ -35,7 +36,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "node scripts/emit-bundled-contracts.mjs && tsup && node scripts/emit-contracts.mjs",
     "build:watch": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
