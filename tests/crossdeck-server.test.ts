@@ -410,7 +410,7 @@ describe("CrossdeckServer", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("track() auto-attaches runtime info (runtime.*) to event properties", async () => {
+  it("track() emits runtime facts in the Envelope v1 context object (not properties)", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse({ object: "list", received: 1, env: "sandbox" }, 202),
     );
@@ -421,27 +421,53 @@ describe("CrossdeckServer", () => {
     await s.flush();
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
-    expect(body.events[0].properties["runtime.nodeVersion"]).toBe(process.versions.node);
-    expect(body.events[0].properties["runtime.host"]).toBeDefined();
-    expect(body.events[0].properties["runtime.platform"]).toBeDefined();
+    const evt = body.events[0];
+    // Envelope v1 §4: runtime facts live in context, not properties.
+    expect(evt.context.nodeVersion).toBe(process.versions.node);
+    expect(evt.context.host).toBeDefined();
+    expect(evt.context.os).toBeDefined();
+    // runtime.* keys must NOT appear in properties (they moved to context).
+    expect(evt.properties["runtime.nodeVersion"]).toBeUndefined();
+    expect(evt.properties["runtime.host"]).toBeUndefined();
+    expect(evt.properties["runtime.platform"]).toBeUndefined();
   });
 
-  it("track() respects caller-supplied properties over runtime defaults on key collision", async () => {
+  it("track() emits envelopeVersion: 1 and seq on every event (Envelope v1 §1/§3)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({ object: "list", received: 2, env: "sandbox" }, 202),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const s = server();
+    s.track({ name: "a", developerUserId: "user_1" });
+    s.track({ name: "b", developerUserId: "user_1" });
+    await s.flush();
+
+    const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
+    expect(body.envelopeVersion).toBe(1);
+    // seq is monotonic within the session, starting at 0.
+    expect(body.events[0].seq).toBeTypeOf("number");
+    expect(body.events[1].seq).toBeGreaterThan(body.events[0].seq);
+  });
+
+  it("track() caller-supplied properties still override super-props on key collision", async () => {
     const fetchSpy = vi.fn().mockResolvedValue(
       jsonResponse({ object: "list", received: 1, env: "sandbox" }, 202),
     );
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     const s = server();
+    // runtime.region is NOT in properties anymore (it's in context),
+    // but caller can still pass any property key they like.
     s.track({
       name: "checkout.started",
       developerUserId: "user_1",
-      properties: { "runtime.region": "override-region" },
+      properties: { customKey: "caller-value" },
     });
     await s.flush();
 
     const body = JSON.parse(fetchSpy.mock.calls[0]![1].body as string);
-    expect(body.events[0].properties["runtime.region"]).toBe("override-region");
+    expect(body.events[0].properties["customKey"]).toBe("caller-value");
   });
 
   // ============================================================

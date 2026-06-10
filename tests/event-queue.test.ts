@@ -28,6 +28,8 @@ function makeEvent(name: string, i = 0): QueuedEvent {
     eventId: `evt_${name}_${i}`,
     name,
     timestamp: 1_700_000_000_000 + i,
+    seq: i,
+    context: { os: "linux", sdkName: "@cross-deck/node", sdkVersion: "test" },
     properties: {},
     anonymousId: "anon_test",
   };
@@ -127,6 +129,51 @@ describe("EventQueue — basic enqueue + flush", () => {
     const [url, init] = fetchSpy.mock.calls[0]!;
     expect(url).toContain("/events");
     expect(init.headers["Idempotency-Key"]).toMatch(/^batch_/);
+  });
+
+  it("flush() sends envelopeVersion: 1 on every batch (Envelope v1 §1)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({ object: "list", received: 1, env: "sandbox" }, 202),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 100,
+      intervalMs: 60_000,
+      envelope,
+      scheduler: captureScheduler().scheduler,
+    });
+    q.enqueue(makeEvent("a"));
+    await q.flush();
+
+    const body = JSON.parse((fetchSpy.mock.calls[0]![1] as { body: string }).body) as Record<string, unknown>;
+    expect(body.envelopeVersion).toBe(1);
+  });
+
+  it("flush() preserves seq and context on wire events (Envelope v1 §3 / §4)", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(
+      jsonResponse({ object: "list", received: 1, env: "sandbox" }, 202),
+    );
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 100,
+      intervalMs: 60_000,
+      envelope,
+      scheduler: captureScheduler().scheduler,
+    });
+    const evt = makeEvent("test.event", 0);
+    q.enqueue(evt);
+    await q.flush();
+
+    const body = JSON.parse((fetchSpy.mock.calls[0]![1] as { body: string }).body) as {
+      events: Array<Record<string, unknown>>;
+    };
+    const wire = body.events[0]!;
+    expect(wire.seq).toBe(0);
+    expect(wire.context).toMatchObject({ os: "linux", sdkName: "@cross-deck/node" });
   });
 
   it("flush() returns null when the buffer is empty", async () => {

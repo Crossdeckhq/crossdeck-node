@@ -54,7 +54,7 @@ import {
   type CapturedError,
   type ErrorCaptureConfig,
 } from "./error-capture";
-import { collectRuntimeInfo, runtimeInfoToProperties, type RuntimeInfo } from "./runtime-info";
+import { buildEventContext, collectRuntimeInfo, runtimeInfoToProperties, type RuntimeInfo } from "./runtime-info";
 import { FlushOnExit } from "./flush-on-exit";
 import { SuperPropertyStore, type GroupMembership } from "./super-properties";
 import { EntitlementCache, type EntitlementsListener } from "./entitlement-cache";
@@ -142,6 +142,8 @@ export class CrossdeckServer extends EventEmitter {
 
   private readonly runtime: RuntimeInfo;
   private readonly runtimeProperties: Record<string, unknown>;
+  /** Envelope v1 §4 context object — built once at SDK init, reused on every event. */
+  private readonly eventContext: Record<string, string | null>;
   private readonly breadcrumbs: BreadcrumbBuffer;
   private readonly eventQueue: EventQueue;
   private readonly errorTracker: ErrorTracker | null;
@@ -159,6 +161,24 @@ export class CrossdeckServer extends EventEmitter {
    */
   private readonly entitlementStore: EntitlementStore | null;
   private readonly debug: DebugLogger;
+
+  /**
+   * Event Envelope v1 §3 — per-session monotonic sequence counter.
+   *
+   * Node has no mobile "session" lifecycle (no app launch / background /
+   * foreground). We model a session as the SDK instance lifetime: the
+   * counter starts at 0 on construction and increments once per
+   * `track()` call. `session.started` is the boot-telemetry event
+   * (the first `track()` called from `emitBootTelemetryEvent()`), so
+   * the seq will be 0 for that event, matching the spec's "reset to 0
+   * at session.started" clause — by construction, it's the zeroth event
+   * of this instance's lifecycle.
+   *
+   * The counter persists for the entire process lifetime of the SDK
+   * instance (spec §3 clause 1: background/foreground does not reset).
+   * A new `CrossdeckServer` construction is the only reset (new session).
+   */
+  private sessionSeq = 0;
 
   /**
    * Alias map — `developerUserId` / `anonymousId` → canonical
@@ -230,6 +250,9 @@ export class CrossdeckServer extends EventEmitter {
       appVersion: options.appVersion,
     });
     this.runtimeProperties = runtimeInfoToProperties(this.runtime);
+    // Build the Envelope v1 §4 context object once — it's process-stable
+    // (runtime info is frozen at boot) and reused on every event.
+    this.eventContext = buildEventContext(this.runtime, SDK_NAME, this.sdkVersion);
 
     this.breadcrumbs = new BreadcrumbBuffer(options.breadcrumbsMaxSize ?? 50);
     this.superProps = new SuperPropertyStore();
@@ -817,15 +840,19 @@ export class CrossdeckServer extends EventEmitter {
     }
 
     // Enrichment order (parity with web SDK):
-    //   1. Runtime info (auto-detected)
-    //   2. Super-properties (registered via server.register(...))
-    //   3. Group memberships → `$groups.<type>: id` (server.group(...))
-    //   4. Caller-supplied properties (sanitised — most authoritative)
+    //   1. Super-properties (registered via server.register(...))
+    //   2. Group memberships → `$groups.<type>: id` (server.group(...))
+    //   3. Caller-supplied properties (sanitised — most authoritative)
+    //
+    // NOTE: runtime.* props are no longer merged into `properties` here.
+    // They are promoted into the Envelope v1 §4 `context` object on the
+    // wire event (see `eventContext` field). Super-properties may still
+    // carry runtime.* keys if the caller registered them explicitly —
+    // that is intentional (caller wins on key collision).
     //
     // Caller wins on key collision so a developer-set value overrides
     // anything the SDK auto-attached.
     const properties: EventProperties = {
-      ...this.runtimeProperties,
       ...this.superProps.getSuperProperties(),
       ...sanitized,
     };
@@ -836,10 +863,19 @@ export class CrossdeckServer extends EventEmitter {
 
     const identity = this.resolveIdentity(event);
 
+    // Capture seq and timestamp atomically — spec §3 requires seq to be
+    // captured synchronously with the event's timestamp so both reflect
+    // the same enqueue moment. Post-increment: the event gets the current
+    // value, then the counter advances for the next event.
+    const seq = this.sessionSeq++;
+    const timestamp = event.timestamp ?? Date.now();
+
     const queued: QueuedEvent = {
       eventId: event.eventId ?? mintId("evt", 8),
       name: event.name,
-      timestamp: event.timestamp ?? Date.now(),
+      timestamp,
+      seq,
+      context: this.eventContext,
       properties,
       ...identity,
     };
@@ -882,6 +918,8 @@ export class CrossdeckServer extends EventEmitter {
 
     const normalized = events.map((event) => this.normalizeIngestEvent(event));
     const body: Record<string, unknown> = {
+      // Event Envelope v1 §1 — wire version (parity with the queue path).
+      envelopeVersion: 1,
       events: normalized,
       sdk: { name: SDK_NAME, version: this.sdkVersion },
       // Match the queue's batch envelope (see event-queue.ts) — backend

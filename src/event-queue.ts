@@ -52,6 +52,17 @@ export interface QueuedEvent {
   eventId: string;
   name: string;
   timestamp: number;
+  /**
+   * Event Envelope v1 §3 — per-session monotonic sequence number.
+   * Captured synchronously with `timestamp` at `track()` / enqueue time.
+   * Monotonic within a session; reset to 0 at `session.started`.
+   */
+  seq: number;
+  /**
+   * Event Envelope v1 §4 — standardized device/platform context,
+   * promoted out of `properties` into a top-level named object.
+   */
+  context: Record<string, string | null>;
   properties: EventProperties;
   // identity hint — at least one of these is always set per-event for
   // Node (the caller supplies them; the SDK doesn't mint anonymousId).
@@ -239,6 +250,11 @@ export class EventQueue {
     try {
       const env = this.cfg.envelope();
       const body: Record<string, unknown> = {
+        // Event Envelope v1 §1 — schema/wire version the server uses to
+        // decide whether it can parse this payload. Integer 1; only bumped
+        // on a breaking wire change. Distinct from sdk.version (which
+        // answers "which build?") — two questions, two fields.
+        envelopeVersion: 1,
         events: batch,
         sdk: env.sdk,
       };

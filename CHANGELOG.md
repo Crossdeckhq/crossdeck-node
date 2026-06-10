@@ -4,6 +4,37 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-06-10
+
+Event Envelope v1 conformance — server-enforced contract (spec
+`backend/docs/event-envelope-spec-v1.md`).
+
+**Added:**
+
+- **`envelopeVersion: 1`** (integer) on every batch POST body. Both the
+  queue-flush path (`EventQueue.flush()`) and the direct `ingest()` path
+  now emit this field. The server will reject payloads missing this field
+  once ingest enforcement lands.
+- **`seq`** (number) on every wire event — per-session monotonic sequence
+  number. Captured synchronously with the event's `timestamp` at
+  `track()` / enqueue time. Counter starts at 0 when the `CrossdeckServer`
+  instance is constructed (session start) and increments once per event.
+  Matches spec §3: monotonic within a session, never reset between
+  background/foreground (Node has no such lifecycle; the instance lifetime
+  IS the session).
+- **`context`** (object) on every wire event — standardized device/platform
+  context (spec §4), promoted out of `properties`. Common fields: `os`,
+  `osVersion`, `appVersion`, `sdkName`, `sdkVersion`, `locale`, `timezone`.
+  Node-specific: `nodeVersion`, `host`, `region` (the existing
+  `runtime.*` props, promoted).
+
+**Changed:**
+
+- `track()` no longer merges `runtime.*` keys into `properties`. Those
+  facts now live in the top-level `context` object on the wire event.
+  Super-properties registered via `server.register()` continue to appear
+  in `properties` unchanged (caller-supplied values are unaffected).
+
 ## [1.5.1] — 2026-05-27
 
 `crossdeck.contract_failed` is now single-fire to a dedicated

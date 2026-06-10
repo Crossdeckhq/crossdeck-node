@@ -355,6 +355,10 @@ function safePid(): string {
  *
  * Null fields are omitted so downstream property bags don't fill with
  * empty columns.
+ *
+ * NOTE: runtime.* props are kept for super-property / breadcrumb
+ * enrichment. The per-event `context` object (Envelope v1 §4) is built
+ * separately by `buildEventContext()`.
  */
 export function runtimeInfoToProperties(info: RuntimeInfo): Record<string, unknown> {
   const out: Record<string, unknown> = {
@@ -370,4 +374,42 @@ export function runtimeInfoToProperties(info: RuntimeInfo): Record<string, unkno
   if (info.instanceId) out["runtime.instanceId"] = info.instanceId;
   if (info.appVersion) out.appVersion = info.appVersion;
   return out;
+}
+
+/**
+ * Build the Event Envelope v1 §4 `context` object for each wire event.
+ *
+ * Common fields (all platforms): `os`, `osVersion`, `appVersion`,
+ * `sdkName`, `sdkVersion`, `locale`, `timezone`.
+ *
+ * Node-specific: `runtime` sub-object `{ nodeVersion, host, region }` —
+ * these are the existing `runtime.*` props promoted from `properties`
+ * into the standardized top-level `context` object.
+ *
+ * Null values are preserved as null (the spec's "unknown/absent" sentinel
+ * rather than omitting the key entirely — allows the server to distinguish
+ * "SDK didn't collect this" from "key missing due to old SDK version").
+ */
+export function buildEventContext(
+  info: RuntimeInfo,
+  sdkName: string,
+  sdkVersion: string,
+): Record<string, string | null> {
+  const ctx: Record<string, string | null> = {
+    // Common fields (spec §4, all platforms)
+    os: info.platform,
+    osVersion: info.platformRelease,
+    appVersion: info.appVersion ?? null,
+    sdkName,
+    sdkVersion,
+    // locale / timezone: Node has no process-level locale by default;
+    // surface them from the environment if available, otherwise null.
+    locale: (typeof process !== "undefined" && process.env["LANG"]) || null,
+    timezone: (typeof Intl !== "undefined" && Intl.DateTimeFormat().resolvedOptions().timeZone) || null,
+    // Node-specific runtime context (spec §4 Node section)
+    nodeVersion: info.nodeVersion,
+    host: info.host,
+    region: info.region ?? null,
+  };
+  return ctx;
 }
