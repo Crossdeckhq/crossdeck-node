@@ -12,9 +12,30 @@ import {
   DIAGNOSTIC_TELEMETRY_ENDPOINT,
   filterDiagnosticPayload,
 } from "../src/_diagnostic-telemetry";
+import { BUNDLED_CONTRACTS } from "../src/_contracts-bundled";
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const contract = require("../../../contracts/diagnostics/contract-failed-payload-schema-lock.json");
+// The schema-lock contract ships INSIDE the SDK — `_contracts-bundled.ts`
+// is generated at build time from
+// contracts/diagnostics/contract-failed-payload-schema-lock.json. Read
+// the SHIPPED copy, not the monorepo source path: `../../../contracts/`
+// exists in the monorepo but NOT in the standalone published repo (the
+// mirror ships only the SDK), so the old require() broke the publish
+// workflow's test gate. Reading the bundled copy keeps this test
+// self-contained within the package and tests exactly what customers get.
+interface SchemaLockFields {
+  readonly required: readonly string[];
+  readonly optional: readonly string[];
+  readonly forbidden: readonly string[];
+}
+const contract = BUNDLED_CONTRACTS.find(
+  (c) => c.id === "contract-failed-payload-schema-lock",
+) as ((typeof BUNDLED_CONTRACTS)[number] & { allowedFields: SchemaLockFields }) | undefined;
+
+if (!contract) {
+  throw new Error(
+    "bundled contract 'contract-failed-payload-schema-lock' missing — run `npm run build` to regenerate src/_contracts-bundled.ts",
+  );
+}
 
 describe("contract-failed schema-lock — Node", () => {
   it("DIAGNOSTIC_TELEMETRY_ALLOWED_KEYS matches required ∪ optional", () => {

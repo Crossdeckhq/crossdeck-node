@@ -25,6 +25,18 @@ format. Purely additive; no public API change.
   remediation, and `version_error` to `CrossdeckErrorType`. `CrossdeckError`
   carries `minVersion` / `surface` from the 426 body. New `onParked` callback.
 
+**Fixed (no public API change):**
+
+- The empty-input contract is now codified cross-SDK as
+  `invalid-input-rejected-natively`: `track("")` / `aliasIdentity` with a
+  missing `userId` reject at the call site by throwing a typed `CrossdeckError`
+  (`missing_event_name` / `missing_user_id`) and never reach the wire — the
+  Node/JS idiom of the invariant *"invalid input never crashes the app."* No
+  behaviour change; the guarantee is now documented and bundled.
+- Standalone-build fix: the `contract-failed` schema-lock test now reads the
+  bundled contract (`_contracts-bundled.ts`) instead of the monorepo
+  `contracts/` path, so the published-mirror release build no longer fails.
+
 See https://cross-deck.com/docs/sdk-event-durability/ for the durability contract.
 
 ## [1.6.0] — 2026-06-10
