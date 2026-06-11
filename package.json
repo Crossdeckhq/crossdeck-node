@@ -1,6 +1,6 @@
 {
   "name": "@cross-deck/node",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Crossdeck server SDK for Node.js — verified subscriptions, entitlements, server-side error capture, and product telemetry in one client.",
   "license": "MIT",
   "homepage": "https://cross-deck.com",
@@ -43,7 +43,7 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run lint && npm test && npm run build"
+    "prepublishOnly": "node scripts/guard-ci-publish.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

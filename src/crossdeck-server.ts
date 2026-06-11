@@ -323,6 +323,17 @@ export class CrossdeckServer extends EventEmitter {
           error: info.lastError,
         });
       },
+      onParked: (info) => {
+        // Second signal channel (the queue already logged ONE console line).
+        // PARK is NOT a drop: events are held (in-memory on Node — see the
+        // opt-in disk-queue follow-up) and resume on upgrade. The dashboard
+        // reads sdk.parked to render the calm amber "update to resume" advisory.
+        this.debug.emit(
+          "sdk.parked",
+          `[crossdeck] SDK parked — server no longer accepts this version's event format. Events held (paused, not lost); update @cross-deck/node${info.minVersion ? ` to >= ${info.minVersion}` : ""} and restart to resume.`,
+          { ...info },
+        );
+      },
       onFirstFlushSuccess: () => {
         this.debug.emit("sdk.first_event_sent", "First batch landed.");
       },

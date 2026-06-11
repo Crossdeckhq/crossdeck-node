@@ -75,6 +75,11 @@ export const DIAGNOSTIC_TELEMETRY_ALLOWED_KEYS: ReadonlySet<string> = new Set([
   "test_file",
   "test_name",
   "device_class",
+  // verification_phase — categorical `boot` / `hot_path` bucket set by the
+  // runtime contract verifier layer. Declared in the shared diagnostics
+  // contract (contracts/diagnostics/contract-failed-payload-schema-lock.json)
+  // and carried by web/swift; node had drifted by omitting it.
+  "verification_phase",
 ]);
 
 /**

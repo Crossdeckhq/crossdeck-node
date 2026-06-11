@@ -17,12 +17,13 @@ describe("CROSSDECK_ERROR_CODES — Node catalogue", () => {
     }
   });
 
-  it("every type is one of the seven CrossdeckErrorType union members", () => {
+  it("every type is one of the CrossdeckErrorType union members", () => {
     const validTypes = new Set([
       "authentication_error",
       "permission_error",
       "invalid_request_error",
       "rate_limit_error",
+      "version_error",
       "internal_error",
       "network_error",
       "configuration_error",

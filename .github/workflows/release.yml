@@ -1,0 +1,78 @@
+name: Release
+
+# THE publish door for @cross-deck/node. Runs in the PUBLIC repo
+# (crossdeck-node) on a version-tag push (the monorepo mirrors source + pushes
+# the tag). npm TRUSTED PUBLISHING (OIDC) — no token, no one-time-pin, never
+# local. The prepublishOnly guard (scripts/guard-ci-publish.mjs) refuses any
+# other path.
+#
+# npmjs.com → @cross-deck/node → Trusted Publisher MUST name repository
+# "VistaApps-za/crossdeck-node" AND workflow "release.yml" exactly.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CROSSDECK_RELEASE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+      - name: Resolve version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Version gate — package.json must match the tag
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$PKG" != "$VERSION" ]; then
+            echo "::error::package.json version $PKG does not match tag v$VERSION"; exit 1
+          fi
+      - name: Changelog gate — CHANGELOG.md must have an entry for this version
+        run: |
+          if ! grep -qE "^## \[${VERSION}\]" CHANGELOG.md; then
+            echo "::error::No CHANGELOG.md entry '## [${VERSION}]' — refuse to publish an undocumented release."; exit 1
+          fi
+      - name: Install
+        run: npm ci
+      - name: Type check
+        run: npm run lint
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Publish to npm (trusted publishing)
+        run: npm publish --access public --provenance
+      - name: GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "@cross-deck/node ${{ github.ref_name }}"
+          generate_release_notes: true
+      - name: Record published version in /v1/sdk/versions
+        env:
+          MANIFEST_WRITE_TOKEN: ${{ secrets.SDK_MANIFEST_WRITE_TOKEN }}
+        run: |
+          # Best-effort — see web/release.yml. A missing endpoint/token must not
+          # fail a successful npm publish; the committed seed is authoritative.
+          curl -fsS -X POST "https://api.cross-deck.com/v1/internal/sdk-versions" \
+            -H "Authorization: Bearer ${MANIFEST_WRITE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"surface\":\"node\",\"version\":\"${VERSION}\"}" \
+            && echo "manifest updated: node@${VERSION}" \
+            || echo "::warning::manifest write-back deferred — /v1/sdk/versions seed covers it"

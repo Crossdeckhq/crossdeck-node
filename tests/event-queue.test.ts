@@ -713,3 +713,73 @@ describe("EventQueue — permanent failure on 4xx (P0 #6)", () => {
     expect(q.getStats().inFlight).toBe(1);
   });
 });
+
+describe("EventQueue — PARK (HTTP 426 / sdk_version_unsupported)", () => {
+  let originalFetch: typeof fetch;
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  function park426(): Response {
+    return jsonResponse(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "sdk_version_unsupported",
+          message: "Your SDK version is too old for this server.",
+          minVersion: "1.6.0",
+          surface: "node",
+        },
+      },
+      426,
+    );
+  }
+
+  it("PARKS on 426 — holds events (never drops), hushes flushing, fires onParked + ONE console warning", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(park426());
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let parked: { minVersion?: string; surface?: string } | null = null;
+    const q = new EventQueue({
+      http: makeHttp(),
+      batchSize: 2,
+      intervalMs: 1500,
+      envelope,
+      scheduler: () => () => {},
+      onParked: (info) => {
+        parked = info;
+      },
+    });
+    q.enqueue(makeEvent("a", 0));
+    q.enqueue(makeEvent("b", 1));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // Held in memory, NOT dropped — the whole point of PARK. (Node is
+    // in-memory: a process restart before upgrade clears these, per the
+    // ticketed opt-in disk-queue follow-up; within the process they're held.)
+    expect(q.getStats().dropped).toBe(0);
+    expect(q.getStats().buffered).toBe(2); // folded back to the buffer front
+    expect(q.getStats().inFlight).toBe(0);
+
+    // Signalled both channels: callback (→ dashboard heartbeat) + console.
+    expect(parked).toEqual({ minVersion: "1.6.0", surface: "node" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("PARKED");
+    expect(String(warn.mock.calls[0]![0])).toContain("1.6.0");
+
+    // Hushed: further flushes are no-ops — no pointless rejects in the logs.
+    await q.flush();
+    await q.flush();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // A new event re-parks WITHOUT a second console line (one per process).
+    q.enqueue(makeEvent("c", 2));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});

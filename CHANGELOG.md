@@ -4,6 +4,29 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-06-11
+
+**PARK on version-rejection — events are held, never dropped.** A third
+event-queue outcome for the day the server stops accepting an outdated event
+format. Purely additive; no public API change.
+
+**Added:**
+
+- **PARK (HTTP `426` / `sdk_version_unsupported`).** A version-rejection is now
+  recognised as its own outcome — distinct from retry (transient) and drop
+  (invalid): the data is good, only the wire dialect is stale. The queue
+  **holds** the events (folded to the buffer front, FIFO-capped at 1000),
+  **hushes** (stops flushing a known-too-old payload), **signals** once (one
+  `console.warn` + a typed `sdk.parked` debug event), and delivers on restart
+  after you upgrade. Node's queue is in-memory, so a process restart *before*
+  upgrade clears the held events — an opt-in disk-backed queue is on the
+  roadmap; the messaging says exactly this, never more.
+- **`sdk_version_unsupported`** added to the error-codes catalogue with
+  remediation, and `version_error` to `CrossdeckErrorType`. `CrossdeckError`
+  carries `minVersion` / `surface` from the 426 body. New `onParked` callback.
+
+See https://cross-deck.com/docs/sdk-event-durability/ for the durability contract.
+
 ## [1.6.0] — 2026-06-10
 
 Event Envelope v1 conformance — server-enforced contract (spec

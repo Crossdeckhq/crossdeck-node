@@ -42,6 +42,11 @@ export type DebugSignal =
   // regardless of debug mode — see the console.error in
   // crossdeck-server.ts.
   | "sdk.flush_permanent_failure"
+  // Emitted when the server PARKS the SDK (HTTP 426 / sdk_version_unsupported):
+  // the wire dialect is too old. Distinct from flush_permanent_failure —
+  // events are HELD (not dropped) and deliver on upgrade. The dashboard reads
+  // it to render the amber "update to resume" advisory.
+  | "sdk.parked"
   | "sdk.flush_on_exit_started"
   | "sdk.flush_on_exit_completed"
   | "sdk.webhook_verified"
