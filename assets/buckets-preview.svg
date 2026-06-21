@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" role="img" aria-label="Crossdeck Buckets — where your reads go, before and after a fix. Baseline 18,899 reads per hour; rolling 24h 994K reads; vs before plus 101K per day; 91 percent untagged.">
+  <rect x="6" y="6" width="868" height="380" rx="16" fill="#FFFFFF" stroke="#ECEAE6"/>
+
+  <!-- header -->
+  <text x="40" y="37" font-size="19" font-weight="700" fill="#14110F">Buckets</text>
+  <rect x="116" y="24" width="36" height="18" rx="4" fill="#F0EEEA"/>
+  <text x="134" y="37" font-size="10" font-weight="600" fill="#8A8A86" text-anchor="middle">OSS</text>
+  <text x="166" y="37" font-size="12.5" fill="#8A8A86">Where your reads go — before and after a fix</text>
+
+  <rect x="650" y="21" width="184" height="23" rx="11.5" fill="#FCFBF9" stroke="#ECEAE6"/>
+  <circle cx="666" cy="32.5" r="3.6" fill="#E85D44"/>
+  <text x="677" y="36" font-size="11" fill="#57544F">Fix shipped <tspan font-weight="600" fill="#14110F">27h ago</tspan></text>
+
+  <!-- sub-line -->
+  <text x="40" y="64" font-size="11.5" fill="#8A8A86">baseline <tspan font-weight="600" fill="#57544F">18,899 reads/hr</tspan> · the 24h before</text>
+  <text x="834" y="64" font-size="12" font-weight="600" fill="#E85D44" text-anchor="end">+2% rising ↑</text>
+
+  <!-- baseline guide -->
+  <line x1="40" y1="214" x2="816" y2="214" stroke="#D8D6D1" stroke-width="1" stroke-dasharray="3 4"/>
+  <text x="816" y="210" font-size="9" fill="#B0AEA9" text-anchor="end">baseline</text>
+
+  <!-- before/after bars (red = above baseline, green = below) -->
+  <g>
+    <rect x="40"  y="210" width="17" height="40"  rx="2.5" fill="#E85D44"/>
+    <rect x="68"  y="222" width="17" height="28"  rx="2.5" fill="#2A9D68"/>
+    <rect x="96"  y="197" width="17" height="53"  rx="2.5" fill="#E85D44"/>
+    <rect x="124" y="238" width="17" height="12"  rx="2.5" fill="#2A9D68"/>
+    <rect x="152" y="138" width="17" height="112" rx="2.5" fill="#E85D44"/>
+    <rect x="180" y="227" width="17" height="23"  rx="2.5" fill="#2A9D68"/>
+    <rect x="208" y="210" width="17" height="40"  rx="2.5" fill="#E85D44"/>
+    <rect x="236" y="231" width="17" height="19"  rx="2.5" fill="#2A9D68"/>
+    <rect x="264" y="212" width="17" height="38"  rx="2.5" fill="#E85D44"/>
+    <rect x="292" y="234" width="17" height="16"  rx="2.5" fill="#2A9D68"/>
+    <rect x="320" y="208" width="17" height="42"  rx="2.5" fill="#E85D44"/>
+    <rect x="348" y="239" width="17" height="11"  rx="2.5" fill="#2A9D68"/>
+    <rect x="376" y="199" width="17" height="51"  rx="2.5" fill="#E85D44"/>
+    <rect x="404" y="240" width="17" height="10"  rx="2.5" fill="#2A9D68"/>
+    <rect x="432" y="185" width="17" height="65"  rx="2.5" fill="#E85D44"/>
+    <rect x="460" y="241" width="17" height="9"   rx="2.5" fill="#2A9D68"/>
+    <rect x="488" y="214" width="17" height="36"  rx="2.5" fill="#E85D44"/>
+    <rect x="516" y="231" width="17" height="19"  rx="2.5" fill="#2A9D68"/>
+    <rect x="544" y="130" width="17" height="120" rx="2.5" fill="#E85D44"/>
+    <rect x="572" y="222" width="17" height="28"  rx="2.5" fill="#2A9D68"/>
+    <rect x="600" y="229" width="17" height="21"  rx="2.5" fill="#2A9D68"/>
+    <rect x="628" y="187" width="17" height="63"  rx="2.5" fill="#E85D44"/>
+    <rect x="656" y="220" width="17" height="30"  rx="2.5" fill="#2A9D68"/>
+    <rect x="684" y="202" width="17" height="48"  rx="2.5" fill="#E85D44"/>
+    <rect x="712" y="222" width="17" height="28"  rx="2.5" fill="#2A9D68"/>
+    <rect x="740" y="223" width="17" height="27"  rx="2.5" fill="#2A9D68"/>
+    <rect x="768" y="227" width="17" height="23"  rx="2.5" fill="#2A9D68"/>
+    <rect x="796" y="239" width="17" height="11"  rx="2.5" fill="#2A9D68"/>
+  </g>
+  <text x="40"  y="266" font-size="9" fill="#B0AEA9">+1h</text>
+  <text x="544" y="266" font-size="9" fill="#B0AEA9" text-anchor="middle">+19h</text>
+  <text x="804" y="266" font-size="9" fill="#B0AEA9" text-anchor="end">+28h</text>
+
+  <!-- stat cards -->
+  <g>
+    <rect x="40"  y="288" width="242" height="84" rx="12" fill="#FCFBF9" stroke="#ECEAE6"/>
+    <text x="60"  y="318" font-size="11" fill="#8A8A86">rolling 24h</text>
+    <text x="60"  y="352" font-size="26" font-weight="700" fill="#14110F">994K<tspan font-size="12" font-weight="400" fill="#8A8A86"> reads</tspan></text>
+
+    <rect x="312" y="288" width="242" height="84" rx="12" fill="#FCFBF9" stroke="#ECEAE6"/>
+    <text x="332" y="318" font-size="11" fill="#8A8A86">vs before</text>
+    <text x="332" y="352" font-size="26" font-weight="700" fill="#E85D44">+101K<tspan font-size="12" font-weight="400" fill="#8A8A86"> /day</tspan></text>
+
+    <rect x="584" y="288" width="242" height="84" rx="12" fill="#FCFBF9" stroke="#ECEAE6"/>
+    <text x="604" y="318" font-size="11" fill="#8A8A86">Untagged</text>
+    <text x="604" y="352" font-size="26" font-weight="700" fill="#C2860A">91%</text>
+  </g>
+</svg>

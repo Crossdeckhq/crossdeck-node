@@ -2,6 +2,10 @@
 
 The Crossdeck server SDK for Node.js — one install, three pillars: **errors**, **analytics**, **entitlements**.
 
+![Crossdeck Buckets — where your reads go, before and after a fix](assets/buckets-preview.svg)
+
+**This is what you get back.** Crossdeck shows you where your database reads actually go — and what a fix did to them, hour by hour, before and after you shipped it. Ship a change, and the dashboard above tells you whether the curve bent. It's live in every Crossdeck project. [See it on your own data →](https://cross-deck.com)
+
 ```bash
 npm install @cross-deck/node
 ```

@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-06-21
+
+**Docs.** The README now opens with the Buckets preview — "where your reads go,
+before and after a fix" — so you can see what Crossdeck reports back before you
+read a line of API. No code change; SDK behaviour is identical to 1.8.0.
+
 ## [1.8.0] — 2026-06-21
 
 **Self-defends against re-instantiation (Next.js / serverless).** Constructing
