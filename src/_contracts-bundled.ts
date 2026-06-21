@@ -5,8 +5,8 @@
 
 import type { Contract } from "./contracts";
 
-export const BUNDLED_IN = "@cross-deck/node@1.6.0" as const;
-export const SDK_VERSION = "1.6.0" as const;
+export const BUNDLED_IN = "@cross-deck/node@1.8.0" as const;
+export const SDK_VERSION = "1.8.0" as const;
 
 export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
   {
@@ -129,7 +129,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
       "legal/security/index.html#diagnostic",
       "legal/sdk-data/index.html#b-diagnostic"
     ],
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "documentation-honesty",
@@ -161,7 +161,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 7.1",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "error-envelope-shape",
@@ -200,7 +200,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 8 (codifies existing contract)",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "flush-interval-parity",
@@ -245,7 +245,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.3",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "idempotency-key-deterministic",
@@ -350,7 +350,63 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 2.2.a + 2.2.b + 2.2.c",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
+  },
+  {
+    "id": "invalid-input-rejected-natively",
+    "pillar": "errors",
+    "status": "enforced",
+    "claim": "No public SDK API ever crashes the host app, and invalid input never reaches the wire. Invalid input (empty event name, empty userId, out-of-range config such as a non-positive breadcrumb capacity, NaN/Infinity/oversize/cyclic property values) is rejected at the call site WITHOUT a fatal trap. The signalling IDIOM is per-language and intentionally NOT uniform: Web, Node, and React Native THROW a typed CrossdeckError synchronously (code missing_event_name / missing_user_id / invalid_request_error) — a normal, catchable JavaScript convention where an uncaught throw logs and the app continues; Swift DROPS with a debug-log signal (track_dropped / identify_dropped) to match its non-throwing fire-and-forget surface, and exposes the throwing equivalent only via identifyAndWait(userId:). What is UNIFORM is the invariant, not the mechanism: every SDK rejects the same inputs, no public fire-and-forget API contains a fatalError / assertionFailure / precondition reachable from customer input, and no rejected input is enqueued or transmitted. Swift additionally proves this in BOTH debug and release configuration, because precondition fires under -O while assertionFailure does not. The bug class this contract closes was never the per-language difference — it was the UNDECLARED difference: each SDK's public API documentation must state its own semantics explicitly (TS docs: 'throws on empty name'; Swift docs: 'drops and logs').",
+    "appliesTo": [
+      "web",
+      "node",
+      "react-native",
+      "swift"
+    ],
+    "codeRef": [
+      "sdks/web/src/crossdeck.ts",
+      "sdks/node/src/crossdeck-server.ts",
+      "sdks/react-native/src/crossdeck.ts",
+      "sdks/swift/Sources/Crossdeck/Crossdeck.swift",
+      "sdks/swift/Sources/Crossdeck/Breadcrumbs.swift"
+    ],
+    "testRef": [
+      {
+        "file": "sdks/web/tests/crossdeck.test.ts",
+        "name": "track with empty name throws synchronously"
+      },
+      {
+        "file": "sdks/web/tests/crossdeck.test.ts",
+        "name": "rejects empty userId"
+      },
+      {
+        "file": "sdks/node/tests/crossdeck-server.test.ts",
+        "name": "track() throws CrossdeckError with code 'missing_event_name' when event name is empty"
+      },
+      {
+        "file": "sdks/react-native/tests/crossdeck.test.ts",
+        "name": "track('') throws CrossdeckError(missing_event_name) synchronously"
+      },
+      {
+        "file": "sdks/react-native/tests/crossdeck.test.ts",
+        "name": "identify('') rejects with CrossdeckError(missing_user_id)"
+      },
+      {
+        "file": "sdks/swift/Tests/CrossdeckTests/CrossdeckPublicAPITests.swift",
+        "name": "test_track_dropsEmptyName"
+      },
+      {
+        "file": "sdks/swift/Tests/CrossdeckTests/CrossdeckPublicAPITests.swift",
+        "name": "test_identifyAndWait_rejectsEmptyId"
+      },
+      {
+        "file": "sdks/swift/Tests/CrossdeckTests/PublicAPIInputSafetyTests.swift",
+        "name": "test_start_withZeroBreadcrumbCapacity_doesNotTrap"
+      }
+    ],
+    "registeredAt": "2026-06-11",
+    "firstRegisteredIn": "swift trap-on-input class fix — first machine-tested Swift release",
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "node-pii-scrubber",
@@ -389,7 +445,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.1",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "node-shutdown-awaits-flush",
@@ -422,7 +478,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 5.4",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "sdk-error-codes-catalogue",
@@ -467,7 +523,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 6.2",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "sync-purchases-funnel-parity",
@@ -500,7 +556,7 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 3.5",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   },
   {
     "id": "verifier-timestamp-mandatory",
@@ -554,6 +610,6 @@ export const BUNDLED_CONTRACTS: readonly Contract[] = Object.freeze([
     ],
     "registeredAt": "2026-05-26",
     "firstRegisteredIn": "bank-grade reconciliation v1.4.0 — phase 7.2",
-    "bundledIn": "@cross-deck/node@1.6.0"
+    "bundledIn": "@cross-deck/node@1.8.0"
   }
 ]) as readonly Contract[];

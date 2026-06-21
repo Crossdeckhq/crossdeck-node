@@ -120,7 +120,10 @@ export interface CrossdeckServerEvents {
 }
 
 export class CrossdeckServer extends EventEmitter {
-  private readonly http: HttpClient;
+  // `!` (definite assignment): these are assigned on the real construction path,
+  // but the singleton guard in the constructor can `return` an existing instance
+  // before reaching them — that early return is the only path that skips them.
+  private readonly http!: HttpClient;
   private readonly sdkVersion: string;
   private readonly baseUrl: string;
   private readonly appId: string | undefined;
@@ -128,8 +131,8 @@ export class CrossdeckServer extends EventEmitter {
   /** PII scrubber toggle. Default true — parity with Web/RN/Swift.
    * Pre-v1.4.0 the Node SDK shipped track() payloads UNREDACTED,
    * a privacy contract drift versus the README. */
-  private readonly scrubPii: boolean;
-  private readonly secretKeyPrefix: string;
+  private readonly scrubPii!: boolean;
+  private readonly secretKeyPrefix!: string;
 
   /**
    * Process-stable pseudo-anonymous ID. Used as the default identity
@@ -138,18 +141,18 @@ export class CrossdeckServer extends EventEmitter {
    * context). Stable for the SDK instance's lifetime so events from
    * the same process correlate.
    */
-  private readonly processAnonymousId: string;
+  private readonly processAnonymousId!: string;
 
-  private readonly runtime: RuntimeInfo;
-  private readonly runtimeProperties: Record<string, unknown>;
+  private readonly runtime!: RuntimeInfo;
+  private readonly runtimeProperties!: Record<string, unknown>;
   /** Envelope v1 §4 context object — built once at SDK init, reused on every event. */
-  private readonly eventContext: Record<string, string | null>;
-  private readonly breadcrumbs: BreadcrumbBuffer;
-  private readonly eventQueue: EventQueue;
-  private readonly errorTracker: ErrorTracker | null;
-  private readonly flushOnExit: FlushOnExit | null;
-  private readonly superProps: SuperPropertyStore;
-  private readonly entitlementCache: EntitlementCache;
+  private readonly eventContext!: Record<string, string | null>;
+  private readonly breadcrumbs!: BreadcrumbBuffer;
+  private readonly eventQueue!: EventQueue;
+  private readonly errorTracker!: ErrorTracker | null;
+  private readonly flushOnExit!: FlushOnExit | null;
+  private readonly superProps!: SuperPropertyStore;
+  private readonly entitlementCache!: EntitlementCache;
   /**
    * Optional developer-supplied durable store for last-known-good
    * entitlements (Redis / their DB / a KV). `undefined` when not
@@ -159,8 +162,8 @@ export class CrossdeckServer extends EventEmitter {
    * Touched ONLY from the async `getEntitlements()` — never from the
    * synchronous `isEntitled()`.
    */
-  private readonly entitlementStore: EntitlementStore | null;
-  private readonly debug: DebugLogger;
+  private readonly entitlementStore!: EntitlementStore | null;
+  private readonly debug!: DebugLogger;
 
   /**
    * Event Envelope v1 §3 — per-session monotonic sequence counter.
@@ -223,6 +226,32 @@ export class CrossdeckServer extends EventEmitter {
     this.appId = options.appId;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.env = inferEnvFromKey(options.secretKey);
+
+    // ── SINGLETON GUARD — the Next.js / serverless re-instantiation fix ──────────
+    // Frameworks like Next.js re-evaluate module scope (HMR, per-route isolation,
+    // chunk splitting), so `new CrossdeckServer({...})` at module top-level can run
+    // MANY times in one process. Each run would otherwise fire another boot
+    // heartbeat, start another flush timer, stack another set of process listeners
+    // (beforeExit / SIGTERM / uncaughtException / unhandledRejection), and re-wrap
+    // global fetch — a storm of duplicate phone-homes + an EventEmitter leak
+    // warning. A constructor may legally return an existing object, so for the same
+    // credentials we hand back the instance already built and skip ALL of it. Keyed
+    // by secretKey + appId + baseUrl (env is derived from the key). Same defence
+    // Prisma / Firebase Admin ship for exactly this reason. The recommended
+    // "construct once in module scope" pattern is NOT single-evaluation under
+    // Next.js, so this self-defence protects every customer who follows our docs.
+    const _store = globalThis as typeof globalThis & {
+      __crossdeckServers__?: Map<string, CrossdeckServer>;
+    };
+    const _singletonKey = `${options.secretKey}|${this.appId ?? ""}|${this.baseUrl}`;
+    _store.__crossdeckServers__ ??= new Map<string, CrossdeckServer>();
+    const _existing = _store.__crossdeckServers__.get(_singletonKey);
+    if (_existing) {
+      // `new CrossdeckServer()` yields THIS cached instance; the half-built `this`
+      // (super() + a few field assignments, no side effects yet) is discarded.
+      return _existing;
+    }
+
     this.secretKeyPrefix = maskSecretKey(options.secretKey);
     // PII scrubber on by default — parity with Web/RN/Swift.
     // Explicit `false` opts out for regulator-required audit
@@ -434,6 +463,21 @@ export class CrossdeckServer extends EventEmitter {
         this.emitBootTelemetryEvent();
       });
     }
+
+    // Register the singleton LAST (fully constructed) so a re-evaluated module
+    // returns THIS instance instead of building a second one (the storm fix above).
+    _store.__crossdeckServers__.set(_singletonKey, this);
+  }
+
+  /**
+   * Clear the process-wide singleton cache. The SDK hands back the SAME instance
+   * for the same credentials (the Next.js / serverless re-instantiation guard in
+   * the constructor); this resets that so the next `new CrossdeckServer()` builds a
+   * fresh instance. For TESTS (per-test isolation) and bespoke hot-reload teardown
+   * only — production code never needs it.
+   */
+  static clearSingletonCache(): void {
+    (globalThis as { __crossdeckServers__?: Map<string, unknown> }).__crossdeckServers__?.clear();
   }
 
   /**

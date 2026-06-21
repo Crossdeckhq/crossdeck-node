@@ -42,6 +42,8 @@ if (crossdeck.isEntitled({ userId: "user_847" }, "pro")) {
 }
 ```
 
+Construct the client **once** at module scope and import it where you need it. This is safe even under frameworks that re-evaluate modules (Next.js HMR, per-route isolation, React Server Components): for a given secret key the SDK returns the same instance every time, so you never get a duplicate client. _(Single-instance guard added in 1.8.0.)_
+
 ## Three USPs, one SDK
 
 ### USP 1 — Errors
@@ -368,7 +370,7 @@ try {
 }
 ```
 
-Subclasses: `CrossdeckAuthenticationError`, `CrossdeckPermissionError`, `CrossdeckValidationError`, `CrossdeckRateLimitError`, `CrossdeckNetworkError`, `CrossdeckInternalError`, `CrossdeckConfigurationError`. All extend `CrossdeckError`. Constructed automatically by the SDK — you never need to instantiate them yourself.
+Subclasses: `CrossdeckAuthenticationError`, `CrossdeckPermissionError`, `CrossdeckValidationError`, `CrossdeckRateLimitError`, `CrossdeckNetworkError`, `CrossdeckInternalError`, `CrossdeckConfigurationError`. All extend `CrossdeckError`. The `version_error` type (code `sdk_version_unsupported`, HTTP 426) carries `minVersion`/`surface` and routes to PARK — see "Outdated-version PARK" above. Constructed automatically by the SDK — you never need to instantiate them yourself.
 
 `CrossdeckErrorCode` is the literal union of every documented code in `CROSSDECK_ERROR_CODES`. Use `isCrossdeckErrorCode` to narrow `string` to the union for type-safe comparisons (catches misspelled codes at compile time).
 
@@ -396,6 +398,12 @@ new CrossdeckServer({
 ```
 
 POST methods (`track`/`ingest`/`syncPurchases`/`grantEntitlement`/`revokeEntitlement`) DO NOT auto-retry at the HTTP layer. Retries happen via the event queue with per-batch `Idempotency-Key` reuse — the server can dedupe replays.
+
+### Outdated-version PARK (v1.7.0)
+
+If the server ever stops accepting this SDK version's event format, the rejection is machine-distinguishable — HTTP `426` with code `sdk_version_unsupported` — and the queue treats it as its own outcome, distinct from retry (transient) and drop (invalid): the events are **parked**. The queue holds them (FIFO-capped at 1,000), stops flushing a known-too-old payload, warns once on the console naming the exact version to update to, and fires the `onParked` callback + a typed `sdk.parked` debug event.
+
+**Honest bound:** the Node queue is in-memory, so a process restart *before* you upgrade clears the held events — an opt-in disk-backed queue is on the roadmap. After you deploy the upgraded SDK, held events deliver on the next flush. Web/RN/Swift hold theirs durably across restarts. Full story: [the durability contract](https://cross-deck.com/docs/sdk-event-durability/).
 
 **v1.4.0 — `syncPurchases` deterministic key.** The Idempotency-Key
 on `syncPurchases` is derived from the request body (UUID-shaped
@@ -584,8 +592,8 @@ CrossdeckContracts.byId("idempotency-key-deterministic");
 CrossdeckContracts.byPillar("revenue");
 CrossdeckContracts.withStatus("proposed");
 CrossdeckContracts.findByTestName("rail namespacing prevents cross-rail collisions");
-CrossdeckContracts.sdkVersion;        // "1.5.0"
-CrossdeckContracts.bundledIn;         // "@cross-deck/node@1.5.0"
+CrossdeckContracts.sdkVersion;        // "1.7.0"
+CrossdeckContracts.bundledIn;         // "@cross-deck/node@1.7.0"
 ```
 
 The `Contract` type is exported alongside; the binary-stability promise is documented in [`contracts/README.md`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md).

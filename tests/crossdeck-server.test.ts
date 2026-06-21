@@ -91,6 +91,37 @@ describe("CrossdeckServer", () => {
   });
 
   // ============================================================
+  // singleton guard — the Next.js / serverless re-instantiation fix
+  // ============================================================
+
+  it("returns the SAME instance for the same credentials (re-instantiation guard)", () => {
+    const opts = {
+      secretKey: "cd_sk_test_001",
+      appId: "app_singleton",
+      errorCapture: false as const,
+      flushOnExit: false as const,
+      bootHeartbeat: false as const,
+    };
+    const a = new CrossdeckServer(opts);
+    const b = new CrossdeckServer(opts);
+    // A re-evaluated module (Next.js HMR / per-route isolation) must NOT build a
+    // second instance — no second boot heartbeat, no stacked process listeners.
+    expect(b).toBe(a);
+  });
+
+  it("returns DISTINCT instances for different credentials", () => {
+    const base = {
+      appId: "app_singleton",
+      errorCapture: false as const,
+      flushOnExit: false as const,
+      bootHeartbeat: false as const,
+    };
+    const a = new CrossdeckServer({ ...base, secretKey: "cd_sk_test_001" });
+    const c = new CrossdeckServer({ ...base, secretKey: "cd_sk_test_002" });
+    expect(c).not.toBe(a);
+  });
+
+  // ============================================================
   // identify / aliasIdentity — direct HTTP
   // ============================================================
 
@@ -1511,6 +1542,9 @@ describe("CrossdeckServer", () => {
         bootHeartbeat: false,
       });
       expect(noStore.diagnostics().entitlements.coldStartDurable).toBe(false);
+      // noStore and serverWithStore share the same singleton key (same secret, no
+      // appId), so clear the cache to get a genuinely distinct with-store instance.
+      CrossdeckServer.clearSingletonCache();
       // Wiring a store closes the cold-start gap.
       expect(
         serverWithStore(memoryStore()).diagnostics().entitlements.coldStartDurable,

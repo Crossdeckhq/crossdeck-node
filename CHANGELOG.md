@@ -4,6 +4,31 @@ All notable changes to `@cross-deck/node` will be documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.8.0] — 2026-06-21
+
+**Self-defends against re-instantiation (Next.js / serverless).** Constructing
+`new CrossdeckServer()` at module top-level is the documented pattern, but
+frameworks like Next.js re-evaluate module scope (HMR, per-route isolation, chunk
+splitting), so it could run many times in one process — each time firing another
+boot heartbeat, starting another flush timer, stacking another set of process
+listeners (`beforeExit` / `SIGTERM` / `uncaughtException` / `unhandledRejection`),
+and re-wrapping global `fetch`. That produced a storm of duplicate phone-homes and
+an `EventEmitter` max-listeners warning. The SDK now guards against it — minor,
+backwards-compatible.
+
+**Fixed:**
+
+- **Singleton guard.** The constructor now returns the EXISTING instance for the
+  same credentials (secretKey + appId + baseUrl) instead of building a second one,
+  so re-evaluation never re-boots. Same defence Prisma / Firebase Admin ship for
+  the same reason. New `CrossdeckServer.clearSingletonCache()` static for tests /
+  bespoke hot-reload teardown.
+- **Idempotent `fetch` wrap.** The error-capture fetch wrapper tags itself and
+  skips wrapping an already-wrapped `fetch`, so a double-install can't
+  double-capture every request.
+
 ## [1.7.0] — 2026-06-11
 
 **PARK on version-rejection — events are held, never dropped.** A third

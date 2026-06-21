@@ -364,6 +364,11 @@ export class ErrorTracker {
   private installFetchWrap(): void {
     const origFetch = globalThis.fetch;
     if (typeof origFetch !== "function") return;
+    // Idempotency: if our wrapper is ALREADY installed (a second instance slipped
+    // past the singleton, or install() ran twice), do NOT wrap our own wrapper —
+    // that double-captures every request and stacks on each reload. Pre-fix this
+    // re-wrapped unconditionally.
+    if ((origFetch as { __crossdeckWrapped__?: boolean }).__crossdeckWrapped__) return;
     const tracker = this;
     const wrapped: typeof fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
       const input = args[0];
@@ -413,6 +418,7 @@ export class ErrorTracker {
         throw err;
       }
     };
+    (wrapped as { __crossdeckWrapped__?: boolean }).__crossdeckWrapped__ = true;
     globalThis.fetch = wrapped;
     this.cleanups.push(() => {
       // Restore only if we're still the active wrapper. Another
