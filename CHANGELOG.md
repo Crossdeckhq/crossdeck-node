@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-06-22
+
+**Docs.** Reverted the read-cost dashboard preview 1.8.1 added to the README —
+it belongs on Buckets (the read-cost product), not on this telemetry SDK. No
+code change; behaviour is identical to 1.8.0 and 1.8.1.
+
 ## [1.8.1] — 2026-06-21
 
 **Docs.** The README now opens with the Buckets preview — "where your reads go,
