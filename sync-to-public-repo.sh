@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sync the @cross-deck/node SDK source from this monorepo to the public
-# repo at https://github.com/VistaApps-za/crossdeck-node.
+# repo at https://github.com/Crossdeckhq/crossdeck-node.
 #
 # We develop in the monorepo (alongside backend + dashboard) and mirror
 # the SDK directory to its public home before each release. This script
@@ -12,12 +12,12 @@
 #
 # Prereqs:
 #   - gh CLI authenticated against the VistaApps-za GitHub account
-#   - https://github.com/VistaApps-za/crossdeck-node exists
+#   - https://github.com/Crossdeckhq/crossdeck-node exists
 #   - This monorepo working tree is clean (changes committed)
 
 set -euo pipefail
 
-PUBLIC_REPO="VistaApps-za/crossdeck-node"
+PUBLIC_REPO="Crossdeckhq/crossdeck-node"
 LOCAL_CLONE="${TMPDIR:-/tmp}/crossdeck-node-sync"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMMIT_MSG="${1:-Sync from monorepo}"

@@ -32,6 +32,7 @@
  */
 
 import type { CrossdeckServer } from "../crossdeck-server";
+import { bridgeReadCost } from "../read-cost-bridge";
 
 /**
  * Shape of an Express request object — enough fields for the
@@ -132,6 +133,24 @@ export function crossdeckExpress(
 
     const start = Date.now();
     let dispatched = false;
+
+    // Read-cost cross-match (the moat): stamp WHO for this request *before* the
+    // route handler runs, so every database read it issues attributes to the
+    // identified user in Buckets. We set the actor here at entry — the route
+    // pattern isn't resolved until Express matches downstream, so WHAT is named
+    // by the handler's own `bucket()` tags / SDK feature capture. No-op unless
+    // the Buckets collector is installed; never throws into the request.
+    try {
+      let actor: string | undefined;
+      try {
+        actor = options.getIdentity?.(req)?.developerUserId;
+      } catch {
+        // identity extraction must never break the request pipeline
+      }
+      if (actor) bridgeReadCost({ actor });
+    } catch {
+      // the bridge is best-effort — a missing collector is a silent no-op
+    }
 
     const emit = (): void => {
       if (dispatched) return;

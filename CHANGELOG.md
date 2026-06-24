@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-06-24
+
+**Added — read-cost cross-match (the Buckets bridge).** When
+[`@cross-deck/buckets`](https://www.npmjs.com/package/@cross-deck/buckets) is
+installed alongside this SDK, the auto-events adapters now tell it **who** and
+**what** each request is, so every database read inside the request attributes to
+the identified user *and* the operation that spent it — the cross-match no
+standalone read profiler can do.
+
+- `crossdeckExpress` stamps the request's `developerUserId` (from your
+  `getIdentity`) as the read-cost **actor** at request entry, before the route
+  handler issues a single read.
+- `wrapLambdaHandler` stamps the **actor** *and* the **function name** as the
+  operation (the function is the unit on serverless).
+
+Decoupled and zero-dependency: the SDK never imports Buckets — it drives a global
+bridge (`__crossdeckBucketsBridge__`). With no collector installed, every call is
+a silent no-op, so this is safe whether a customer runs the SDK alone, Buckets
+alone, or both. WHAT on the server is otherwise named by your own `bucket()` tags.
+
 ## [1.8.2] — 2026-06-22
 
 **Docs.** Reverted the read-cost dashboard preview 1.8.1 added to the README —

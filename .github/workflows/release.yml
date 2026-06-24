@@ -7,7 +7,7 @@ name: Release
 # other path.
 #
 # npmjs.com → @cross-deck/node → Trusted Publisher MUST name repository
-# "VistaApps-za/crossdeck-node" AND workflow "release.yml" exactly.
+# "Crossdeckhq/crossdeck-node" AND workflow "release.yml" exactly.
 
 on:
   push:

@@ -29,6 +29,7 @@
  */
 
 import type { CrossdeckServer } from "../crossdeck-server";
+import { bridgeReadCost } from "../read-cost-bridge";
 
 /**
  * Minimal shape of the AWS Lambda invocation context. We don't pull
@@ -104,6 +105,17 @@ export function wrapLambdaHandler<TEvent, TResult>(
     const coldStart = containerColdStart;
     containerColdStart = false;
     const identity = safeExtractIdentity(options.getIdentity, event, context);
+
+    // Read-cost cross-match: stamp WHO + WHAT for this invocation before the
+    // handler runs, so its database reads attribute to the user and the function.
+    // The function name IS the operation on serverless — a natural WHAT. Each
+    // invocation is its own async context, so this never leaks across requests.
+    // No-op unless @cross-deck/buckets is installed; never throws.
+    try {
+      bridgeReadCost({ actor: identity?.developerUserId, feature: context.functionName });
+    } catch {
+      // best-effort — a missing collector is a silent no-op
+    }
 
     server.track({
       name: "function.invoked",

@@ -11,7 +11,7 @@ SDK: no surprises, no silent contract drift, no half-tested artefacts.
 - [ ] Backend routes used by the SDK are merged and deployed together with
       the SDK version that depends on them.
 - [ ] README examples match the current public methods exactly.
-- [ ] Public source repo exists at `VistaApps-za/crossdeck-node`.
+- [ ] Public source repo exists at `Crossdeckhq/crossdeck-node`.
 - [ ] `package.json → repository.url` points at the public `crossdeck-node`
       repo before publishing to npm.
 - [ ] `./sync-to-public-repo.sh "<release commit message>"` has mirrored the

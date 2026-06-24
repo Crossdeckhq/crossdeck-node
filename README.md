@@ -213,6 +213,28 @@ For test fixtures that need to mint signed webhooks against the same scheme, `si
 
 ## Cross-cutting
 
+### Read-cost cross-match (Buckets)
+
+Install [`@cross-deck/buckets`](https://www.npmjs.com/package/@cross-deck/buckets)
+alongside this SDK and the auto-events adapters wire the **cross-match** for you:
+every database read inside a request attributes to the **user** who triggered it and
+the **operation** that spent it — the thing a standalone query profiler can't tell
+you, because it doesn't know your users.
+
+- `crossdeckExpress` stamps the request's `developerUserId` (from your `getIdentity`)
+  as the read-cost actor, at request entry — before the route handler runs.
+- `wrapLambdaHandler` stamps the actor *and* the function name as the operation.
+
+```ts
+app.use(crossdeckExpress(server, {
+  getIdentity: (req) => ({ developerUserId: req.user?.id }), // WHO — also drives reads
+}));
+```
+
+No new dependency and no import of Buckets — the SDK drives a global bridge, so a
+missing collector is a silent no-op. Name the heavy server operations with `bucket()`
+from Buckets; read it all back with `npx @cross-deck/buckets` or in the dashboard.
+
 ### Runtime info
 
 Auto-detected at construction. Attached to every event + error as `runtime.*` properties:
