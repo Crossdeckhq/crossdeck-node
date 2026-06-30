@@ -76,6 +76,18 @@ export interface BlockVerdict {
   /** The exact rule that fired: `"domain:spartan.net"` | `"ip:1.2.3.4"` | `"manual"` | null. */
   blockedKey: string | null;
   /**
+   * Human-quotable support handle for this verdict (the "Ray ID"), formatted `xxxx-xxxx`.
+   * Show it on your suspended screen ("reference: blocklist:domain · a1f9-7c2e"); Crossdeck
+   * stores the same string on the block event, so support resolves it in the Caught feed.
+   */
+  reference?: string | null;
+  /**
+   * The recorded support contact (the project owner's signup email), present only when
+   * blocked — render it as the suspended screen's "Contact support" so appeals reach the
+   * real operator by default. Override with a dedicated address if you have one.
+   */
+  supportEmail?: string | null;
+  /**
    * True when this is the fail-open default (Crossdeck unreachable / identity unresolved).
    * `blocked` is `false`; log it for observability, never treat it as a real "not blocked".
    */
@@ -151,6 +163,10 @@ export interface GateVerdict {
   blockReason: string | null;
   /** The exact rule/key that fired, when blocked. */
   blockedKey: string | null;
+  /** Human-quotable support handle (the "Ray ID"), formatted `xxxx-xxxx` — show it on the blocked screen. */
+  reference?: string | null;
+  /** Recorded support contact (project owner's signup email), present only on `block` — the blocked screen's "Contact support" default. */
+  supportEmail?: string | null;
   /** True when this is the fail-open default (Crossdeck unreachable). `allow` is `true`. */
   degraded?: boolean;
 }

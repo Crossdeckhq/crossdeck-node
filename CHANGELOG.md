@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-06-30
+
+**Added — block `reference` and `supportEmail` on the trust surface (still v2 preview).**
+`resolve()` and `gate()` now surface two fields on a block:
+
+- `reference` — a short, opaque, human-quotable support handle (the "Ray ID", `xxxx-xxxx`).
+  Show it on your suspended screen; Crossdeck stores the same string on the block event, so
+  support resolves a quoted reference to the exact block in the admin Caught feed.
+- `supportEmail` — the email you registered with Crossdeck at signup, so your suspended
+  screen's "Contact support" reaches the real operator by default instead of a placeholder.
+
+Both were typed on `ResolveResult` / `GateVerdict` but the client previously **dropped**
+them when building the result object — now passed through. Additive, non-breaking. Opaque +
+non-PII (never the score or rule logic).
+
 ## [1.10.1] — 2026-06-30
 
 **Fixed — the blocking surface now works for the documented paths (still v2 preview).**
