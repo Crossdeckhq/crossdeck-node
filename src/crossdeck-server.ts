@@ -67,6 +67,7 @@ import type {
   AliasResult,
   AuditEntry,
   AuditEntryResponse,
+  BlockVerdict,
   CrossdeckServerOptions,
   Diagnostics,
   EntitlementMutationResult,
@@ -82,9 +83,12 @@ import type {
   IdentifyOptions,
   IngestOptions,
   IngestResponse,
+  OwnerStatusInput,
   PublicEntitlement,
   PurchaseResult,
   RequestOptions,
+  ResolveInput,
+  ResolveResult,
   RevokeEntitlementInput,
   ServerEvent,
   StoredEntitlements,
@@ -752,6 +756,150 @@ export class CrossdeckServer extends EventEmitter {
     );
     this.populateEntitlementCache({ customerId }, response);
     return response;
+  }
+
+  // ── Blocking — "entitlements, inverted" (Crossdeck Trust, v2 preview) ───────
+  //
+  // getEntitlements() answers "can they access Pro?"; resolve() answers "should
+  // they be here at all?". Same call, opposite question. Both read Crossdeck live.
+  // The safety inversion: entitlements fail CLOSED (protect revenue); blocking
+  // fails OPEN (protect real users) — these methods NEVER throw for the verdict
+  // and NEVER return blocked:true on uncertainty.
+
+  /**
+   * Resolve a user's BLOCK verdict (plus identity / entitlement context) — the same
+   * `/v1/resolve` you'd call for entitlements, read for `blocked`. Wire it into signup
+   * and every visit; on `blocked`, sign the user out (and, for public content, take
+   * their pages offline — see the Blocking developer guide, Pattern B).
+   *
+   * **Fail-open is the contract.** This never throws for the block decision and never
+   * returns `blocked: true` on uncertainty. Any error — Crossdeck unreachable, timeout,
+   * unresolved identity — yields `{ blocked: false, degraded: true }`, so a glitch can
+   * never lock out a real user.
+   *
+   * Forward the END USER's `ip` (you call this server-to-server, so otherwise Crossdeck
+   * sees your server's IP and an ip-rule can't match the visitor), and the verified
+   * identity (`userId` + `idToken`) so a `domain`/`email` rule can match the email.
+   *
+   * @experimental Preview — Crossdeck Trust ships with Crossdeck v2. Stable shape, not yet GA.
+   */
+  async resolve(input: ResolveInput, options?: RequestOptions): Promise<ResolveResult> {
+    const failOpen = (): ResolveResult => ({
+      blocked: false,
+      blockReason: null,
+      blockedKey: null,
+      degraded: true,
+      status: "anonymous",
+      entitlements: [],
+      crossdeckCustomerId: null,
+      anonymousId: input?.anonymousId ?? null,
+      identityError: null,
+    });
+    if (!input || (!input.anonymousId && !(input.userId && input.idToken))) {
+      this.debug.emit(
+        "sdk.resolve_missing_identity",
+        "resolve() needs anonymousId OR (userId + idToken); returning fail-open blocked:false.",
+      );
+      return failOpen();
+    }
+    try {
+      const raw = await this.http.request<{
+        status?: string;
+        blocked?: boolean;
+        blockReason?: string | null;
+        blockedKey?: string | null;
+        entitlements?: unknown;
+        crossdeckCustomerId?: string | null;
+        anonymousId?: string | null;
+        user?: { id?: string | null } | null;
+        identityError?: { reason: string } | null;
+      }>("POST", "/resolve", {
+        body: {
+          ...(input.userId ? { userId: input.userId } : {}),
+          ...(input.idToken ? { idToken: input.idToken } : {}),
+          ...(input.anonymousId ? { anonymousId: input.anonymousId } : {}),
+          ...(input.ip ? { ip: input.ip } : {}),
+        },
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      });
+      return {
+        blocked: raw.blocked === true,
+        blockReason: raw.blockReason ?? null,
+        blockedKey: raw.blockedKey ?? null,
+        status: typeof raw.status === "string" ? raw.status : "active",
+        entitlements: Array.isArray(raw.entitlements)
+          ? raw.entitlements.filter((e): e is string => typeof e === "string")
+          : [],
+        crossdeckCustomerId: raw.crossdeckCustomerId ?? raw.user?.id ?? null,
+        anonymousId: raw.anonymousId ?? input.anonymousId ?? null,
+        identityError: raw.identityError ?? null,
+      };
+    } catch (err) {
+      this.debug.emit(
+        "sdk.resolve_failed",
+        `resolve() failed — fail-open blocked:false. ${err instanceof Error ? err.message : String(err)}`,
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+      return failOpen();
+    }
+  }
+
+  /**
+   * Convenience over {@link resolve}: just the boolean. Fail-open (false on any error).
+   *
+   * @experimental Preview — see {@link resolve}.
+   */
+  async isBlocked(input: ResolveInput, options?: RequestOptions): Promise<boolean> {
+    return (await this.resolve(input, options)).blocked;
+  }
+
+  /**
+   * The OWNER's block verdict for the public-page path (Pattern B / §5b of the Blocking
+   * developer guide) — "is the owner of this page blocked?", no session token required.
+   * Pass the owner's recorded identifiers (`userId`/`email`/`domain`/`ip`; the `ip` is
+   * their CREATION ip, not a live visitor's). Poll on a short TTL to invalidate your
+   * public-page cache. Fail-open — any error → `{ blocked: false, degraded: true }`.
+   *
+   * @experimental Preview — see {@link resolve}.
+   */
+  async getOwnerStatus(input: OwnerStatusInput, options?: RequestOptions): Promise<BlockVerdict> {
+    const query: Record<string, string | undefined> = {
+      userId: input?.userId || undefined,
+      email: input?.email || undefined,
+      domain: input?.domain || undefined,
+      ip: input?.ip || undefined,
+    };
+    if (!query.userId && !query.email && !query.domain && !query.ip) {
+      this.debug.emit(
+        "sdk.owner_status_missing_identity",
+        "getOwnerStatus() needs at least one of userId/email/domain/ip; returning fail-open blocked:false.",
+      );
+      return { blocked: false, blockReason: null, blockedKey: null, degraded: true };
+    }
+    try {
+      const raw = await this.http.request<{
+        blocked?: boolean;
+        blockReason?: string | null;
+        blockedKey?: string | null;
+      }>("GET", "/trust/status", {
+        query,
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      });
+      return {
+        blocked: raw.blocked === true,
+        blockReason: raw.blockReason ?? null,
+        blockedKey: raw.blockedKey ?? null,
+      };
+    } catch (err) {
+      this.debug.emit(
+        "sdk.owner_status_failed",
+        `getOwnerStatus() failed — fail-open blocked:false. ${err instanceof Error ? err.message : String(err)}`,
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+      return { blocked: false, blockReason: null, blockedKey: null, degraded: true };
+    }
   }
 
   /**

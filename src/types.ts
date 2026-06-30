@@ -41,6 +41,84 @@ export interface EntitlementsListResponse {
 }
 
 /**
+ * Identity for {@link CrossdeckServer.resolve} / {@link CrossdeckServer.isBlocked}.
+ * Send the END USER's identity, not your server's.
+ *
+ * @experimental Preview — Crossdeck Trust ships with Crossdeck v2. Shape is stable; the
+ * surface is not yet GA.
+ */
+export interface ResolveInput {
+  /** Your signed-in user id. */
+  userId?: string;
+  /** A SIGNED proof of that user (e.g. their Firebase ID token). Required alongside `userId` for the verified path. */
+  idToken?: string;
+  /** Anonymous device id (the Web SDK's `getAnonymousId()`). Folds a pre-login device. */
+  anonymousId?: string;
+  /**
+   * The END USER's IP. Forward it — you call resolve server-to-server, so without it
+   * Crossdeck sees YOUR server's IP and an ip-rule can't match the visitor.
+   */
+  ip?: string;
+}
+
+/**
+ * The block verdict. Fail-open: on any error these come back `{ blocked: false }`,
+ * never an exception — a glitch can never lock out a real user (the mirror of
+ * entitlements, which fail closed).
+ *
+ * @experimental Preview — see {@link ResolveInput}.
+ */
+export interface BlockVerdict {
+  /** True ONLY when Crossdeck holds an explicit block on this identity. */
+  blocked: boolean;
+  /** Why, when blocked: e.g. `"blocklist:domain"` | `"blocklist:ip"` | `"blocked"`. */
+  blockReason: string | null;
+  /** The exact rule that fired: `"domain:spartan.net"` | `"ip:1.2.3.4"` | `"manual"` | null. */
+  blockedKey: string | null;
+  /**
+   * True when this is the fail-open default (Crossdeck unreachable / identity unresolved).
+   * `blocked` is `false`; log it for observability, never treat it as a real "not blocked".
+   */
+  degraded?: boolean;
+}
+
+/**
+ * The full {@link CrossdeckServer.resolve} result — the block verdict plus the identity /
+ * entitlement context, so one call answers "should they be here?" and "what can they
+ * access?" together.
+ *
+ * @experimental Preview — see {@link ResolveInput}.
+ */
+export interface ResolveResult extends BlockVerdict {
+  /** `"active"` | `"anonymous"` | … the resolved identity status. */
+  status: string;
+  /** Active entitlement keys for this identity (e.g. `["pro"]`). */
+  entitlements: string[];
+  /** The canonical Crossdeck customer id, when resolved. */
+  crossdeckCustomerId: string | null;
+  /** The anonymous id Crossdeck resolved / assigned. */
+  anonymousId: string | null;
+  /**
+   * Set when a verified identity was sent but couldn't be checked (e.g. the auth issuer
+   * isn't registered). If you sent `userId`+`idToken` and `status` is `"anonymous"`, read this.
+   */
+  identityError: { reason: string } | null;
+}
+
+/**
+ * Owner identifiers for {@link CrossdeckServer.getOwnerStatus} — the public-page path.
+ * Pass any subset; for a page-offline check the `ip` is the owner's CREATION ip.
+ *
+ * @experimental Preview — see {@link ResolveInput}.
+ */
+export interface OwnerStatusInput {
+  userId?: string;
+  email?: string;
+  domain?: string;
+  ip?: string;
+}
+
+/**
  * Snapshot of one customer's last-known-good entitlements, as written
  * to / read from a durable `EntitlementStore`. Versioned for forward-
  * compat — a future SDK can refuse a blob whose `v` it doesn't know.

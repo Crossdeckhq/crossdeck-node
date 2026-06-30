@@ -52,7 +52,13 @@ export type DebugSignal =
   | "sdk.webhook_verified"
   | "sdk.runtime_detected"
   | "sdk.super_property_registered"
-  | "sdk.boot_heartbeat_failed";
+  | "sdk.boot_heartbeat_failed"
+  // Blocking (Crossdeck Trust, v2 preview) — resolve() / isBlocked() / getOwnerStatus()
+  // fail-open paths. Emitted when a verdict falls back to blocked:false.
+  | "sdk.resolve_missing_identity"
+  | "sdk.resolve_failed"
+  | "sdk.owner_status_missing_identity"
+  | "sdk.owner_status_failed";
 
 export interface DebugContext {
   [key: string]: unknown;

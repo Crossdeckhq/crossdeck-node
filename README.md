@@ -614,8 +614,8 @@ CrossdeckContracts.byId("idempotency-key-deterministic");
 CrossdeckContracts.byPillar("revenue");
 CrossdeckContracts.withStatus("proposed");
 CrossdeckContracts.findByTestName("rail namespacing prevents cross-rail collisions");
-CrossdeckContracts.sdkVersion;        // "1.9.0"
-CrossdeckContracts.bundledIn;         // "@cross-deck/node@1.9.0"
+CrossdeckContracts.sdkVersion;        // "1.10.0"
+CrossdeckContracts.bundledIn;         // "@cross-deck/node@1.10.0"
 ```
 
 The `Contract` type is exported alongside; the binary-stability promise is documented in [`contracts/README.md`](https://github.com/VistaApps-za/crossdeck/blob/main/contracts/README.md).

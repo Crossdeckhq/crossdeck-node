@@ -6,6 +6,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-06-30
+
+**Added — the blocking surface (Crossdeck Trust, v2 preview).** Blocking is
+"entitlements, inverted": `getEntitlements()` answers *can they access Pro?*; the new
+methods answer *should they be here at all?* — the same `/v1/resolve` plumbing, read for
+`blocked`. Additive and non-breaking.
+
+- **`resolve(input)`** → `ResolveResult` — the block verdict plus identity/entitlement
+  context in one call. **Fail-open by contract:** never throws for the verdict and never
+  returns `blocked: true` on uncertainty; any error → `{ blocked: false, degraded: true }`,
+  so a glitch can never lock out a real user (the mirror of entitlements, which fail
+  closed). Forward the end-user's `ip` (server-to-server callers otherwise expose only
+  their own server IP, so ip-rules can't match) and the verified identity
+  (`userId` + `idToken`) so domain/email rules can match.
+- **`isBlocked(input)`** → `boolean` — convenience over `resolve()`; same fail-open.
+- **`getOwnerStatus(input)`** → `BlockVerdict` — the public-page path: *"is the owner of
+  this page blocked?"*, no session token, for cache invalidation on link-in-bio / content
+  platforms (Pattern B).
+
+New exported types: `ResolveInput`, `ResolveResult`, `BlockVerdict`, `OwnerStatusInput`.
+All marked `@experimental` — Crossdeck Trust ships with Crossdeck v2; the shape is stable,
+the surface is not yet GA.
+
 ## [1.9.1] — 2026-06-30
 
 **Docs — knowledge-backbone governance release.** No runtime API change. This
