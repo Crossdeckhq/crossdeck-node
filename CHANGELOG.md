@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-06-30
+
+**Fixed — the blocking surface now works for the documented paths (still v2 preview).**
+
+- `resolve()` / `isBlocked()` now accept a **bare `userId`** — the server-trusted
+  recognition path the backend honours (rides the identity backbone, matches on the email
+  Crossdeck already holds). 1.10.0's guard rejected it and fail-opened *without calling the
+  API*, so a known-user block silently never fired.
+- **Added `gate({ email, ip })`** — the brand-new-signup door (`POST /v1/trust/gate`), the
+  only path that catches a farm Crossdeck has never seen. Fail-open by contract. New
+  `GateInput` / `GateVerdict` types.
+- README now documents the blocking surface (the three doors + the verify-locally pattern).
+
+Still `@experimental` — Crossdeck Trust ships with Crossdeck v2.
+
+
 ## [1.10.0] — 2026-06-30
 
 **Added — the blocking surface (Crossdeck Trust, v2 preview).** Blocking is

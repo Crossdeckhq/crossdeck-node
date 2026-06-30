@@ -58,7 +58,9 @@ export type DebugSignal =
   | "sdk.resolve_missing_identity"
   | "sdk.resolve_failed"
   | "sdk.owner_status_missing_identity"
-  | "sdk.owner_status_failed";
+  | "sdk.owner_status_failed"
+  | "sdk.gate_missing_input"
+  | "sdk.gate_failed";
 
 export interface DebugContext {
   [key: string]: unknown;

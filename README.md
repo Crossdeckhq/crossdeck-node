@@ -211,6 +211,51 @@ app.post("/crossdeck-webhook", express.raw({ type: "application/json" }), (req, 
 
 For test fixtures that need to mint signed webhooks against the same scheme, `signWebhookPayload(payload, secret, timestampSec)` is exported.
 
+### Blocking (Crossdeck Trust) — <sup>v2 preview</sup>
+
+> **Preview — not GA.** The blocking surface launches **end-to-end with Crossdeck v2.**
+> The shape is stable and all methods are `@experimental`, so it's documented and usable
+> now (dogfooding / early access) — but it is **not** a launched feature yet, and this is
+> not a fourth shipped USP. Treat it as preview until the v2 launch.
+
+Blocking is **entitlements, inverted**: `getEntitlements()` asks *"can this user access Pro?"*; these ask *"should this user be here at all?"* — the **same identity backbone**, read for `blocked`. Every method is **fail-open by contract**: it never throws and never returns blocked on uncertainty, so a glitch can never lock out a real user.
+
+There are three doors. Pick by who's at it:
+
+```ts
+// 1. A user you ALREADY KNOW — a bare userId rides the backbone (no token, no setup).
+//    Crossdeck matches on the email it already holds. The common case.
+const { blocked, blockReason } = await crossdeck.resolve({ userId, ip: req.ip });
+if (blocked) { await signOut(); return showSuspended(blockReason); }
+// or just the boolean:  if (await crossdeck.isBlocked({ userId })) …
+
+// 2. A BRAND-NEW signup Crossdeck has never seen — block by the two strings you have
+//    at signup, their email + ip. Call it BEFORE you create the account.
+const gate = await crossdeck.gate({ email, ip: req.ip });
+if (gate.action === "block") return rejectSignup(gate.blockReason);
+
+// 3. A PUBLIC PAGE — "is the owner of this page blocked?" (no session token). Poll on a
+//    short TTL to invalidate your cache; the ip is the owner's CREATION ip.
+const owner = await crossdeck.getOwnerStatus({ userId: ownerId });
+if (owner.blocked) await takePageOffline(ownerId);
+```
+
+**Recommended server pattern (no issuer registration):** if your backend runs Firebase
+Admin, verify the ID token **locally** for the authoritative uid, then send that as a bare
+`userId` — you keep the cryptographic proof on your side and Crossdeck needs zero setup:
+
+```ts
+const { uid } = await getAuth().verifyIdToken(idToken);     // your Firebase Admin
+const { blocked } = await crossdeck.resolve({ userId: uid, ip: req.ip });
+```
+
+Send `userId` + `idToken` to Crossdeck instead only if you *can't* verify locally — that's
+the verified Tier-3 path, and the only one that needs a one-time auth-issuer registration.
+Setting *who* is blocked is a rule in your Crossdeck admin. Full integration guide
+(suspension pages, public-content takedown, the backfill sweep): `CROSSDECK_BLOCKING_DEVELOPER_GUIDE.md`.
+
+Types: `ResolveInput` / `ResolveResult`, `GateInput` / `GateVerdict`, `OwnerStatusInput` / `BlockVerdict`.
+
 ## Cross-cutting
 
 ### Read-cost cross-match (Buckets)

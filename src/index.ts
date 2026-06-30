@@ -77,6 +77,8 @@ export type {
   HeartbeatResponse,
   IdentityHints,
   IdentifyOptions,
+  GateInput,
+  GateVerdict,
   IngestOptions,
   IngestResponse,
   OwnerStatusInput,

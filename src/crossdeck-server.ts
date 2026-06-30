@@ -81,6 +81,8 @@ import type {
   HeartbeatResponse,
   IdentityHints,
   IdentifyOptions,
+  GateInput,
+  GateVerdict,
   IngestOptions,
   IngestResponse,
   OwnerStatusInput,
@@ -795,10 +797,15 @@ export class CrossdeckServer extends EventEmitter {
       anonymousId: input?.anonymousId ?? null,
       identityError: null,
     });
-    if (!input || (!input.anonymousId && !(input.userId && input.idToken))) {
+    // A `CrossdeckServer` is always secret-keyed (a trusted server), so a bare `userId`
+    // is the server-trusted recognition path the backend honours — it rides the identity
+    // backbone and matches on the email Crossdeck already holds, no idToken required. So
+    // we require SOME identity (anonymousId or userId), NOT specifically userId+idToken.
+    // (`idToken` stays optional — send it for the verified Tier-3 path.)
+    if (!input || (!input.anonymousId && !input.userId)) {
       this.debug.emit(
         "sdk.resolve_missing_identity",
-        "resolve() needs anonymousId OR (userId + idToken); returning fail-open blocked:false.",
+        "resolve() needs an anonymousId or a userId; returning fail-open blocked:false.",
       );
       return failOpen();
     }
@@ -899,6 +906,68 @@ export class CrossdeckServer extends EventEmitter {
         { error: err instanceof Error ? err.message : String(err) },
       );
       return { blocked: false, blockReason: null, blockedKey: null, degraded: true };
+    }
+  }
+
+  /**
+   * The brand-new-signup door (§3 of the Blocking developer guide). Block a user Crossdeck
+   * has **never seen** — at the instant they sign up — by the two strings you have then:
+   * their `email` and `ip`. There's no identity to ride yet, so {@link resolve} can't catch
+   * them; this matches `email` / domain / `ip` blocklist rules directly. Call it BEFORE you
+   * create the account; on `action: "block"`, reject the signup.
+   *
+   * **Fail-open by contract** — never throws, never blocks on uncertainty: any error →
+   * `{ action: "allow", allow: true, degraded: true }`, so a glitch can't reject a real signup.
+   *
+   * @experimental Preview — Crossdeck Trust ships with Crossdeck v2.
+   */
+  async gate(input: GateInput, options?: RequestOptions): Promise<GateVerdict> {
+    const failOpen = (): GateVerdict => ({
+      action: "allow",
+      allow: true,
+      blockReason: null,
+      blockedKey: null,
+      degraded: true,
+    });
+    if (!input || (!input.email && !input.ip && !input.domain)) {
+      this.debug.emit(
+        "sdk.gate_missing_input",
+        "gate() needs at least one of email / ip / domain; returning fail-open allow:true.",
+      );
+      return failOpen();
+    }
+    try {
+      const raw = await this.http.request<{
+        action?: string;
+        allow?: boolean;
+        blockReason?: string | null;
+        blockedKey?: string | null;
+        band?: string | null;
+      }>("POST", "/trust/gate", {
+        body: {
+          ...(input.email ? { email: input.email } : {}),
+          ...(input.ip ? { ip: input.ip } : {}),
+          ...(input.domain ? { domain: input.domain } : {}),
+          ...(input.fingerprint ? { fingerprint: input.fingerprint } : {}),
+        },
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      });
+      const action =
+        raw.action === "block" || raw.action === "review" ? raw.action : "allow";
+      return {
+        action,
+        allow: raw.allow !== false && action !== "block",
+        blockReason: raw.blockReason ?? null,
+        blockedKey: raw.blockedKey ?? null,
+      };
+    } catch (err) {
+      this.debug.emit(
+        "sdk.gate_failed",
+        `gate() failed — fail-open allow:true. ${err instanceof Error ? err.message : String(err)}`,
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+      return failOpen();
     }
   }
 

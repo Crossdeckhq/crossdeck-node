@@ -119,6 +119,43 @@ export interface OwnerStatusInput {
 }
 
 /**
+ * Input for {@link CrossdeckServer.gate} — the brand-new-signup door. Pass the two strings
+ * you have at signup: `email` and `ip`. (Optional `domain`/`fingerprint` sharpen the score.)
+ *
+ * @experimental Preview — see {@link ResolveInput}.
+ */
+export interface GateInput {
+  /** The signing-up user's email. Matched against email + domain blocklist rules. */
+  email?: string;
+  /** The signing-up request's IP. Matched against ip rules + datacenter/velocity signals. */
+  ip?: string;
+  /** Optional explicit domain (defaults to the email's domain). */
+  domain?: string;
+  /** Optional device fingerprint — sharpens the composite signup score. */
+  fingerprint?: string;
+}
+
+/**
+ * The signup-gate verdict from {@link CrossdeckServer.gate}. Fail-open: on any error these
+ * come back `{ action: "allow", allow: true, degraded: true }` — a glitch never rejects a
+ * real signup.
+ *
+ * @experimental Preview — see {@link ResolveInput}.
+ */
+export interface GateVerdict {
+  /** `"allow"` | `"review"` | `"block"`. Reject the account only on `"block"`. */
+  action: "allow" | "review" | "block";
+  /** Convenience: `false` only when `action` is `"block"`. */
+  allow: boolean;
+  /** Why, when blocked: e.g. `"disposable_domain"` | `"blocklist:ip"` | `"blocklist:domain"`. */
+  blockReason: string | null;
+  /** The exact rule/key that fired, when blocked. */
+  blockedKey: string | null;
+  /** True when this is the fail-open default (Crossdeck unreachable). `allow` is `true`. */
+  degraded?: boolean;
+}
+
+/**
  * Snapshot of one customer's last-known-good entitlements, as written
  * to / read from a durable `EntitlementStore`. Versioned for forward-
  * compat — a future SDK can refuse a blob whose `v` it doesn't know.
