@@ -223,22 +223,44 @@ Blocking is **entitlements, inverted**: `getEntitlements()` asks *"can this user
 There are three doors. Pick by who's at it:
 
 ```ts
+// The Crossdeck-hosted block page — the recommended dead-end for doors 1 + 2. One
+// constant today; swaps to https://block.cross-deck.com when the alias goes live.
+const BLOCK_PAGE = "https://api.cross-deck.com/v1/trust/page";
+
 // 1. A user you ALREADY KNOW — a bare userId rides the backbone (no token, no setup).
 //    Crossdeck matches on the email it already holds. The common case.
-const { blocked, blockReason } = await crossdeck.resolve({ userId, ip: req.ip });
-if (blocked) { await signOut(); return showSuspended(blockReason); }
+const { blocked, blockEventId } = await crossdeck.resolve({ userId, ip: req.ip });
+if (blocked) {
+  await signOut();
+  return blockEventId
+    ? res.redirect(`${BLOCK_PAGE}/${blockEventId}`) // Crossdeck serves the branded page
+    : res.redirect("/suspended");                   // rare: mint unavailable → your fallback
+}
 // or just the boolean:  if (await crossdeck.isBlocked({ userId })) …
 
 // 2. A BRAND-NEW signup Crossdeck has never seen — block by the two strings you have
 //    at signup, their email + ip. Call it BEFORE you create the account.
 const gate = await crossdeck.gate({ email, ip: req.ip });
-if (gate.action === "block") return rejectSignup(gate.blockReason);
+if (gate.action === "block") {
+  return gate.blockEventId
+    ? res.redirect(`${BLOCK_PAGE}/${gate.blockEventId}`)
+    : rejectSignup(gate.blockReason);
+}
 
 // 3. A PUBLIC PAGE — "is the owner of this page blocked?" (no session token). Poll on a
 //    short TTL to invalidate your cache; the ip is the owner's CREATION ip.
 const owner = await crossdeck.getOwnerStatus({ userId: ownerId });
 if (owner.blocked) await takePageOffline(ownerId);
 ```
+
+**Why redirect instead of building your own screen?** Crossdeck hosts the canonical block
+interstitial — "Access paused", a verification receipt (application name, timestamp, an
+opaque `reference` the person can quote to support), and a **Contact support** action that
+mails the project owner's real recorded email. One page, centrally maintained, updated for
+every integrator at once — you never fork it, restyle it, or let it drift. Redirect **only
+on an explicit block** (`blocked === true` / `action === "block"`): on error or timeout the
+SDK fails open and you let the user through — never send a real user to a block page over
+a network blip.
 
 **Recommended server pattern (no issuer registration):** if your backend runs Firebase
 Admin, verify the ID token **locally** for the authoritative uid, then send that as a bare

@@ -88,6 +88,14 @@ export interface BlockVerdict {
    */
   supportEmail?: string | null;
   /**
+   * The id of the CD-hosted block interstitial minted for THIS verdict — present only when
+   * blocked. The recommended dead-end is one line:
+   * `redirect(\`https://api.cross-deck.com/v1/trust/page/${blockEventId}\`)` — Crossdeck
+   * serves the canonical branded page (receipt + reference + faithful support contact), so
+   * you never hand-build or fork the block screen. Opaque (`cd_blk_…`), no PII in the URL.
+   */
+  blockEventId?: string | null;
+  /**
    * True when this is the fail-open default (Crossdeck unreachable / identity unresolved).
    * `blocked` is `false`; log it for observability, never treat it as a real "not blocked".
    */
@@ -167,6 +175,8 @@ export interface GateVerdict {
   reference?: string | null;
   /** Recorded support contact (project owner's signup email), present only on `block` — the blocked screen's "Contact support" default. */
   supportEmail?: string | null;
+  /** CD-hosted block-page id (`cd_blk_…`), present only on `block` — redirect the rejected signup to `https://api.cross-deck.com/v1/trust/page/${blockEventId}` and Crossdeck serves the canonical branded dead-end. */
+  blockEventId?: string | null;
   /** True when this is the fail-open default (Crossdeck unreachable). `allow` is `true`. */
   degraded?: boolean;
 }

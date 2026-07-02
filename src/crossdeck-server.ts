@@ -820,6 +820,7 @@ export class CrossdeckServer extends EventEmitter {
         anonymousId?: string | null;
         reference?: string | null;
         supportEmail?: string | null;
+        blockEventId?: string | null;
         user?: { id?: string | null } | null;
         identityError?: { reason: string } | null;
       }>("POST", "/resolve", {
@@ -838,6 +839,7 @@ export class CrossdeckServer extends EventEmitter {
         blockedKey: raw.blockedKey ?? null,
         reference: raw.reference ?? null,
         supportEmail: raw.supportEmail ?? null,
+        blockEventId: raw.blockEventId ?? null,
         status: typeof raw.status === "string" ? raw.status : "active",
         entitlements: Array.isArray(raw.entitlements)
           ? raw.entitlements.filter((e): e is string => typeof e === "string")
@@ -948,6 +950,7 @@ export class CrossdeckServer extends EventEmitter {
         blockedKey?: string | null;
         reference?: string | null;
         supportEmail?: string | null;
+        blockEventId?: string | null;
         band?: string | null;
       }>("POST", "/trust/gate", {
         body: {
@@ -968,6 +971,7 @@ export class CrossdeckServer extends EventEmitter {
         blockedKey: raw.blockedKey ?? null,
         reference: raw.reference ?? null,
         supportEmail: raw.supportEmail ?? null,
+        blockEventId: raw.blockEventId ?? null,
       };
     } catch (err) {
       this.debug.emit(

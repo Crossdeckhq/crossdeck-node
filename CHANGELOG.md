@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-07-01
+
+**Added — `blockEventId`: the Crossdeck-hosted block page (v2 preview).**
+On a block, `resolve()` and `gate()` now return `blockEventId` — the id of the
+canonical block interstitial Crossdeck hosts for that exact verdict. The
+recommended dead-end becomes one line:
+
+```ts
+if (blocked && blockEventId) {
+  res.redirect(`https://api.cross-deck.com/v1/trust/page/${blockEventId}`);
+}
+```
+
+Crossdeck serves the branded "Access paused" page — a verification receipt
+(application name, timestamp, the quotable `reference`) and a **Contact
+support** action that mails the project owner's real recorded email — so you
+never hand-build, fork, or drift the block screen. The id is opaque
+(`cd_blk_…`, no PII in the URL) and present only on an explicit block;
+fail-open behaviour is unchanged (never redirect on error/timeout).
+`ResolveResult` and `GateVerdict` carry the new optional field — additive,
+non-breaking. Still `@experimental` until the Crossdeck v2 launch.
+
 ## [1.11.0] — 2026-06-30
 
 **Added — block `reference` and `supportEmail` on the trust surface (still v2 preview).**
