@@ -62,7 +62,7 @@ import { webhooks as webhooksNamespace } from "./webhooks";
 import { scrubPiiFromProperties } from "./consent";
 import { deriveIdempotencyKeyForPurchase } from "./idempotency-key";
 import { ConsoleDebugLogger, NullDebugLogger, findSensitivePropertyKeys, type DebugLogger } from "./debug";
-import { mintId } from "./_rand";
+import { mintId, stableId } from "./_rand";
 import type {
   AliasIdentityInput,
   AliasResult,
@@ -287,7 +287,30 @@ export class CrossdeckServer extends EventEmitter {
       runtimeToken: options.runtimeToken,
     });
 
-    this.processAnonymousId = mintId("anon_node");
+    // Identity of the SERVICE, not of this process.
+    //
+    // This used to be `mintId("anon_node")` — random, once per constructor.
+    // The singleton above keeps that to one id per process, which is correct
+    // on a long-lived server and wrong everywhere serverless: each cold start
+    // is a new `globalThis`, so each one minted a fresh identity. Measured on
+    // one customer's Firebase Functions: 10,589 distinct ids in 30 days
+    // against 679 real browser and app visitors — a 17x overstatement, a
+    // visitor record per cold start, and a people count that was mostly
+    // containers.
+    //
+    // Derived instead from appId + serviceName, both stable across restarts
+    // and deploys. serviceVersion is deliberately EXCLUDED: including it would
+    // mint a new identity on every deploy, which is the same unbounded growth
+    // more slowly. The version already travels on every event's runtime
+    // properties, so nothing is lost.
+    //
+    // Consequence worth knowing: several services sharing one appId without
+    // distinct `serviceName` values now report as ONE server identity. Set
+    // `serviceName` to tell them apart — that is what it is for.
+    this.processAnonymousId = stableId("anon_node", [
+      this.appId ?? "",
+      options.serviceName ?? "",
+    ]);
 
     this.runtime = collectRuntimeInfo({
       serviceName: options.serviceName,

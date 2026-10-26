@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.16.0] - 2026-10-26
+
+### Fixed
+
+- **The server's analytics identity is now stable across cold starts.** It was minted
+  randomly in the constructor, once per process. The `globalThis` singleton keeps that to
+  one id per process, which is right on a long-lived server and wrong on serverless, where
+  every cold start is a fresh `globalThis`. Measured on one customer's Firebase Functions:
+  **10,589 distinct identities in 30 days against 679 real browser and app visitors** — a
+  17x overstatement, a visitor record created per cold start, and a dashboard "people"
+  count that was mostly containers.
+
+  The identity is now derived from `appId` + `serviceName`, both stable across restarts and
+  deploys. `serviceVersion` is deliberately excluded: including it would mint a new identity
+  on every deploy, which is the same unbounded growth at a slower rate. The version already
+  travels on every event's runtime properties.
+
+  **Behaviour change worth reading.** Several services sharing one `appId` without distinct
+  `serviceName` values now report as ONE server identity instead of many. Set `serviceName`
+  to tell them apart — that is what it is for. Existing historical data is unaffected; only
+  identities minted from this version forward are stable.
+
+  The `anon_node_` prefix is unchanged, so anything filtering on it keeps working.
+
+
 ## [1.15.1] - 2026-09-03
 
 ### Changed
